@@ -3,8 +3,9 @@ name = "chatly"
 version = "0.1.0"
 description = "Instagram and Facebook in a locked, encrypted macOS app"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.90"
 license = "MIT"
+repository = "https://github.com/Boldbayar/chatly"
 publish = false
 
 [build-dependencies]

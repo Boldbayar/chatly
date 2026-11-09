@@ -63,8 +63,7 @@ pub fn enroll(key: &Key) -> Result<(), String> {
 pub fn unlock() -> Result<Key, UnlockError> {
     let fingers = authenticate("unlock your chats").map_err(UnlockError::Prompt)?;
     let blob = Zeroizing::new(
-        passwords::get_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-            .map_err(|_| UnlockError::Invalidated)?,
+        passwords::get_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(|_| UnlockError::Invalidated)?,
     );
     if blob.len() != 64 || blob[32..] != fingers {
         return Err(UnlockError::Invalidated);
