@@ -1,0 +1,24 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "shell",
+  "description": "Chatly's own UI. Only the local shell webview is listed and no remote URLs are, so the Instagram, Facebook and Telegram pages can't call anything in Chatly.",
+  "local": true,
+  "webviews": ["shell"],
+  "permissions": [
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+    "allow-status",
+    "allow-setup",
+    "allow-unlock",
+    "allow-unlock-touch-id",
+    "allow-lock",
+    "allow-select-service",
+    "allow-set-overlay",
+    "allow-update-settings",
+    "allow-change-password",
+    "allow-set-touch-id",
+    "allow-sign-out",
+    "allow-erase-everything",
+    "allow-security-check"
+  ]
+}

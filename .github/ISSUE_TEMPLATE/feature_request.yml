@@ -1,0 +1,38 @@
+name: Feature request
+description: Suggest a change or a new feature.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Chatly is a security tool first. Features that weaken the lock, write more to disk, or let web pages reach Chatly are unlikely to be accepted, but ideas that solve the same problem another way are welcome.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem being solved
+      description: What you're trying to do, and what gets in the way today.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How Chatly could behave instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches or workarounds you've thought about.
+
+  - type: textarea
+    id: security
+    attributes:
+      label: Potential security or privacy implications
+      description: Would this change what is stored on disk, what the Instagram, Facebook or Telegram pages can do, what is logged, or when Chatly locks? Write "None that I can see" if you're not sure.
+    validations:
+      required: true

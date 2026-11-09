@@ -1,0 +1,692 @@
+use std::{
+    collections::BTreeMap,
+    fmt, fs,
+    io::{self, Write},
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::Path,
+};
+
+use argon2::{Algorithm, Argon2, Params, Version};
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use chacha20poly1305::{
+    aead::{Aead, KeyInit, Payload},
+    XChaCha20Poly1305, XNonce,
+};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
+use zeroize::Zeroizing;
+
+use crate::{services::Service, storage::SiteStorage};
+
+pub type Key = Zeroizing<[u8; 32]>;
+pub type Sessions = BTreeMap<String, Vec<StoredCookie>>;
+pub type Storage = BTreeMap<String, SiteStorage>;
+
+const FORMAT_VERSION: u32 = 1;
+const AAD_WRAPPED_KEY: &[u8] = b"chatly/v1/wrapped-key";
+const AAD_KEY_CHECK: &[u8] = b"chatly/v1/key-check";
+const AAD_SESSIONS: &[u8] = b"chatly/v1/sessions";
+const AAD_STORAGE: &[u8] = b"chatly/v1/storage";
+
+const KDF_MEMORY_KIB: u32 = 64 * 1024;
+const KDF_PASSES: u32 = 3;
+const KDF_LANES: u32 = 1;
+
+const FREE_ATTEMPTS: u32 = 5;
+const MAX_LOCKOUT_SECS: u64 = 60 * 60;
+
+#[derive(Debug)]
+pub enum Error {
+    WrongPassword,
+    Corrupt(String),
+    Io(String),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::WrongPassword => write!(f, "Wrong password."),
+            Error::Corrupt(what) => write!(f, "The vault file is damaged ({what})."),
+            Error::Io(e) => write!(f, "Couldn't access the vault file: {e}"),
+        }
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(e: io::Error) -> Self {
+        Error::Io(e.to_string())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Kdf {
+    pub alg: String,
+    pub m_kib: u32,
+    pub t: u32,
+    pub p: u32,
+    pub salt: String,
+}
+
+impl Kdf {
+    fn fresh() -> Self {
+        Kdf {
+            alg: "argon2id".into(),
+            m_kib: KDF_MEMORY_KIB,
+            t: KDF_PASSES,
+            p: KDF_LANES,
+            salt: B64.encode(random::<16>()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Sealed {
+    pub nonce: String,
+    pub ct: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Settings {
+    pub auto_lock_minutes: u32,
+    pub lock_on_screen_lock: bool,
+    pub lock_on_hide: bool,
+    pub lock_on_blur: bool,
+    pub hide_from_capture: bool,
+    pub confirm_links: bool,
+    pub remember_sessions: bool,
+    pub wipe_after_failures: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            auto_lock_minutes: 5,
+            lock_on_screen_lock: true,
+            lock_on_hide: true,
+            lock_on_blur: false,
+            hide_from_capture: true,
+            confirm_links: true,
+            remember_sessions: true,
+            wipe_after_failures: false,
+        }
+    }
+}
+
+impl Settings {
+    pub fn sanitized(mut self) -> Self {
+        self.auto_lock_minutes = self.auto_lock_minutes.clamp(1, 60);
+        self
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredCookie {
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+    pub path: String,
+    pub secure: bool,
+    pub http_only: bool,
+    pub same_site: Option<String>,
+    pub expires: Option<i64>,
+}
+
+impl StoredCookie {
+    pub fn from_cookie(c: &cookie::Cookie<'_>) -> Option<Self> {
+        let domain = c.domain()?.trim_start_matches('.').to_string();
+        if domain.is_empty() {
+            return None;
+        }
+        Some(StoredCookie {
+            name: c.name().to_string(),
+            value: c.value().to_string(),
+            domain,
+            path: c.path().unwrap_or("/").to_string(),
+            secure: c.secure().unwrap_or(false),
+            http_only: c.http_only().unwrap_or(false),
+            same_site: c.same_site().map(|s| s.to_string()),
+            expires: c.expires_datetime().map(|d| d.unix_timestamp()),
+        })
+    }
+
+    pub fn is_expired(&self, now: i64) -> bool {
+        self.expires.is_some_and(|e| e <= now)
+    }
+
+    pub fn to_cookie(&self) -> cookie::Cookie<'static> {
+        let mut b = cookie::Cookie::build((self.name.clone(), self.value.clone()))
+            .domain(format!("..{}", self.domain))
+            .path(self.path.clone())
+            .secure(self.secure)
+            .http_only(self.http_only);
+        match self.same_site.as_deref() {
+            Some("Strict") => b = b.same_site(cookie::SameSite::Strict),
+            Some("Lax") => b = b.same_site(cookie::SameSite::Lax),
+            _ => {}
+        }
+        if let Some(at) = self
+            .expires
+            .and_then(|e| cookie::time::OffsetDateTime::from_unix_timestamp(e).ok())
+        {
+            b = b.expires(at);
+        }
+        b.build()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Vault {
+    pub version: u32,
+    pub kdf: Kdf,
+    pub wrapped_key: Sealed,
+    pub key_check: Sealed,
+    #[serde(default)]
+    pub sessions: Option<Sealed>,
+    #[serde(default)]
+    pub storage: Option<Sealed>,
+    #[serde(default)]
+    pub touch_id: bool,
+    #[serde(default)]
+    pub failed_attempts: u32,
+    #[serde(default)]
+    pub lockout_until: u64,
+    #[serde(default)]
+    pub settings: Settings,
+    #[serde(default, deserialize_with = "known_service")]
+    pub last_service: Service,
+}
+
+impl Vault {
+    pub fn create(password: &str) -> Result<(Vault, Key), Error> {
+        let kdf = Kdf::fresh();
+        let kek = derive(password, &kdf)?;
+        let key: Key = Zeroizing::new(random::<32>());
+        let vault = Vault {
+            version: FORMAT_VERSION,
+            wrapped_key: seal(&kek, key.as_ref(), AAD_WRAPPED_KEY),
+            key_check: seal(&key, b"chatly", AAD_KEY_CHECK),
+            kdf,
+            sessions: None,
+            storage: None,
+            touch_id: false,
+            failed_attempts: 0,
+            lockout_until: 0,
+            settings: Settings::default(),
+            last_service: Service::default(),
+        };
+        Ok((vault, key))
+    }
+
+    pub fn unlock(&self, password: &str) -> Result<Key, Error> {
+        let kek = derive(password, &self.kdf)?;
+        let raw = open(&kek, &self.wrapped_key, AAD_WRAPPED_KEY).map_err(|_| Error::WrongPassword)?;
+        if raw.len() != 32 {
+            return Err(Error::Corrupt("key length".into()));
+        }
+        let mut key: Key = Zeroizing::new([0; 32]);
+        key.copy_from_slice(&raw);
+        Ok(key)
+    }
+
+    pub fn check_key(&self, key: &Key) -> bool {
+        open(key, &self.key_check, AAD_KEY_CHECK).is_ok()
+    }
+
+    pub fn rewrap(&mut self, key: &Key, new_password: &str) -> Result<(), Error> {
+        let kdf = Kdf::fresh();
+        let kek = derive(new_password, &kdf)?;
+        self.wrapped_key = seal(&kek, key.as_ref(), AAD_WRAPPED_KEY);
+        self.kdf = kdf;
+        Ok(())
+    }
+
+    pub fn read_sessions(&self, key: &Key) -> Result<Sessions, Error> {
+        open_json(key, self.sessions.as_ref(), AAD_SESSIONS, "sessions")
+    }
+
+    pub fn write_sessions(&mut self, key: &Key, sessions: &Sessions) -> Result<(), Error> {
+        self.sessions = Some(seal_json(key, sessions, AAD_SESSIONS)?);
+        Ok(())
+    }
+
+    pub fn read_storage(&self, key: &Key) -> Result<Storage, Error> {
+        open_json(key, self.storage.as_ref(), AAD_STORAGE, "site storage")
+    }
+
+    pub fn write_storage(&mut self, key: &Key, storage: &Storage) -> Result<(), Error> {
+        self.storage = Some(seal_json(key, storage, AAD_STORAGE)?);
+        Ok(())
+    }
+
+    pub fn forget_sessions(&mut self) {
+        self.sessions = None;
+        self.storage = None;
+    }
+
+    pub fn load(path: &Path) -> Result<Option<Vault>, Error> {
+        match fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|e| Error::Corrupt(e.to_string())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn save(&self, path: &Path) -> Result<(), Error> {
+        let json = serde_json::to_vec_pretty(self).map_err(|e| Error::Corrupt(e.to_string()))?;
+        let tmp = path.with_extension("json.tmp");
+        {
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            f.set_permissions(fs::Permissions::from_mode(0o600))?;
+            f.write_all(&json)?;
+            f.sync_all()?;
+        }
+        fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    pub fn lockout_remaining(&self, now: u64) -> u64 {
+        self.lockout_until.saturating_sub(now)
+    }
+
+    pub fn record_failure(&mut self, now: u64) {
+        self.failed_attempts = self.failed_attempts.saturating_add(1);
+        if self.failed_attempts >= FREE_ATTEMPTS {
+            let doublings = (self.failed_attempts - FREE_ATTEMPTS).min(7);
+            let wait = (30u64 << doublings).min(MAX_LOCKOUT_SECS);
+            self.lockout_until = now + wait;
+        }
+    }
+
+    pub fn record_success(&mut self) {
+        self.failed_attempts = 0;
+        self.lockout_until = 0;
+    }
+}
+
+fn known_service<'de, D: Deserializer<'de>>(d: D) -> Result<Service, D::Error> {
+    Ok(Service::from_id(&String::deserialize(d)?).unwrap_or_default())
+}
+
+fn random<const N: usize>() -> [u8; N] {
+    let mut bytes = [0u8; N];
+    getrandom::fill(&mut bytes).expect("the OS random number generator is unavailable");
+    bytes
+}
+
+fn derive(password: &str, kdf: &Kdf) -> Result<Key, Error> {
+    if kdf.alg != "argon2id" {
+        return Err(Error::Corrupt(format!("unknown KDF {}", kdf.alg)));
+    }
+    let salt = B64.decode(&kdf.salt).map_err(|_| Error::Corrupt("salt".into()))?;
+    let params = Params::new(kdf.m_kib, kdf.t, kdf.p, Some(32)).map_err(|e| Error::Corrupt(e.to_string()))?;
+    let mut out: Key = Zeroizing::new([0; 32]);
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+        .hash_password_into(password.as_bytes(), &salt, out.as_mut())
+        .map_err(|e| Error::Corrupt(e.to_string()))?;
+    Ok(out)
+}
+
+fn cipher(key: &[u8; 32]) -> XChaCha20Poly1305 {
+    XChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(key))
+}
+
+fn seal(key: &[u8; 32], msg: &[u8], aad: &[u8]) -> Sealed {
+    let nonce = random::<24>();
+    let ct = cipher(key)
+        .encrypt(XNonce::from_slice(&nonce), Payload { msg, aad })
+        .expect("XChaCha20-Poly1305 encryption does not fail");
+    Sealed { nonce: B64.encode(nonce), ct: B64.encode(ct) }
+}
+
+fn seal_json<T: Serialize>(key: &[u8; 32], value: &T, aad: &[u8]) -> Result<Sealed, Error> {
+    let json = Zeroizing::new(serde_json::to_vec(value).map_err(|e| Error::Corrupt(e.to_string()))?);
+    Ok(seal(key, &json, aad))
+}
+
+fn open_json<T: DeserializeOwned + Default>(
+    key: &[u8; 32],
+    sealed: Option<&Sealed>,
+    aad: &[u8],
+    what: &str,
+) -> Result<T, Error> {
+    let Some(sealed) = sealed else {
+        return Ok(T::default());
+    };
+    let raw = open(key, sealed, aad).map_err(|_| Error::Corrupt(what.into()))?;
+    serde_json::from_slice(&raw).map_err(|e| Error::Corrupt(e.to_string()))
+}
+
+fn open(key: &[u8; 32], sealed: &Sealed, aad: &[u8]) -> Result<Zeroizing<Vec<u8>>, ()> {
+    let nonce = B64.decode(&sealed.nonce).map_err(|_| ())?;
+    let ct = B64.decode(&sealed.ct).map_err(|_| ())?;
+    if nonce.len() != 24 {
+        return Err(());
+    }
+    cipher(key)
+        .decrypt(XNonce::from_slice(&nonce), Payload { msg: &ct, aad })
+        .map(Zeroizing::new)
+        .map_err(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cookie(name: &str) -> StoredCookie {
+        StoredCookie {
+            name: name.into(),
+            value: "v".into(),
+            domain: "instagram.com".into(),
+            path: "/".into(),
+            secure: true,
+            http_only: true,
+            same_site: Some("Lax".into()),
+            expires: Some(4_000_000_000),
+        }
+    }
+
+    #[test]
+    fn password_round_trip_and_rejection() {
+        let (vault, key) = Vault::create("correct horse battery").unwrap();
+        assert_eq!(*vault.unlock("correct horse battery").unwrap(), *key);
+        assert!(matches!(vault.unlock("wrong"), Err(Error::WrongPassword)));
+        assert!(vault.check_key(&key));
+        assert!(!vault.check_key(&Zeroizing::new([7; 32])));
+    }
+
+    #[test]
+    fn sessions_are_encrypted_and_bound_to_the_key() {
+        let (mut vault, key) = Vault::create("pw-for-test").unwrap();
+        let mut s = Sessions::new();
+        s.insert("instagram".into(), vec![cookie("sessionid")]);
+        vault.write_sessions(&key, &s).unwrap();
+        let on_disk = serde_json::to_string(&vault).unwrap();
+        assert!(!on_disk.contains("sessionid"), "cookie names must not be stored in plain text");
+        assert_eq!(vault.read_sessions(&key).unwrap()["instagram"][0].name, "sessionid");
+        assert!(vault.read_sessions(&Zeroizing::new([1; 32])).is_err());
+    }
+
+    #[test]
+    fn tampering_is_detected() {
+        let (mut vault, key) = Vault::create("pw-for-test").unwrap();
+        vault.write_sessions(&key, &Sessions::new()).unwrap();
+        let sealed = vault.sessions.as_mut().unwrap();
+        let mut ct = B64.decode(&sealed.ct).unwrap();
+        ct[0] ^= 1;
+        sealed.ct = B64.encode(ct);
+        assert!(vault.read_sessions(&key).is_err());
+    }
+
+    #[test]
+    fn rewrap_changes_password_but_not_data() {
+        let (mut vault, key) = Vault::create("old-password").unwrap();
+        let mut s = Sessions::new();
+        s.insert("facebook".into(), vec![cookie("xs")]);
+        vault.write_sessions(&key, &s).unwrap();
+        vault.rewrap(&key, "new-password").unwrap();
+        assert!(matches!(vault.unlock("old-password"), Err(Error::WrongPassword)));
+        let key2 = vault.unlock("new-password").unwrap();
+        assert_eq!(vault.read_sessions(&key2).unwrap()["facebook"][0].name, "xs");
+    }
+
+    #[test]
+    fn lockout_backs_off() {
+        let (mut vault, _) = Vault::create("pw-for-test").unwrap();
+        for _ in 0..4 {
+            vault.record_failure(1000);
+        }
+        assert_eq!(vault.lockout_remaining(1000), 0);
+        vault.record_failure(1000);
+        assert_eq!(vault.lockout_remaining(1000), 30);
+        vault.record_failure(1000);
+        assert_eq!(vault.lockout_remaining(1000), 60);
+        for _ in 0..20 {
+            vault.record_failure(1000);
+        }
+        assert_eq!(vault.lockout_remaining(1000), MAX_LOCKOUT_SECS);
+        vault.record_success();
+        assert_eq!(vault.lockout_remaining(1000), 0);
+    }
+
+    #[test]
+    fn site_storage_is_encrypted_and_bound_to_the_key() {
+        let (mut vault, key) = Vault::create("pw-for-test").unwrap();
+        let mut storage = Storage::new();
+        storage.insert("telegram".into(), [("dc2_auth_key".to_string(), "\"c0ffee\"".to_string())].into());
+        vault.write_storage(&key, &storage).unwrap();
+        let on_disk = serde_json::to_string(&vault).unwrap();
+        assert!(!on_disk.contains("dc2_auth_key"), "storage keys must not be stored in plain text");
+        assert!(!on_disk.contains("c0ffee"), "storage values must not be stored in plain text");
+        assert_eq!(vault.read_storage(&key).unwrap(), storage);
+        assert!(vault.read_storage(&Zeroizing::new([1; 32])).is_err());
+    }
+
+    #[test]
+    fn sessions_and_storage_cant_be_swapped() {
+        let (mut vault, key) = Vault::create("pw-for-test").unwrap();
+        let mut s = Sessions::new();
+        s.insert("instagram".into(), vec![cookie("sessionid")]);
+        vault.write_sessions(&key, &s).unwrap();
+        vault.storage = vault.sessions.clone();
+        assert!(vault.read_storage(&key).is_err());
+        vault.write_storage(&key, &Storage::new()).unwrap();
+        vault.sessions = vault.storage.clone();
+        assert!(vault.read_sessions(&key).is_err());
+    }
+
+    #[test]
+    fn forgetting_clears_cookies_and_storage() {
+        let (mut vault, key) = Vault::create("pw-for-test").unwrap();
+        vault.write_sessions(&key, &Sessions::new()).unwrap();
+        vault.write_storage(&key, &Storage::new()).unwrap();
+        vault.forget_sessions();
+        assert!(vault.sessions.is_none() && vault.storage.is_none());
+        assert!(vault.read_storage(&key).unwrap().is_empty());
+    }
+
+    #[test]
+    fn vaults_without_storage_still_load() {
+        let (vault, key) = Vault::create("pw-for-test").unwrap();
+        let mut json = serde_json::to_value(&vault).unwrap();
+        json.as_object_mut().unwrap().remove("storage");
+        let old: Vault = serde_json::from_value(json).unwrap();
+        assert!(old.storage.is_none());
+        assert!(old.read_storage(&key).unwrap().is_empty());
+        let mut json = serde_json::to_value(&vault).unwrap();
+        json["last_service"] = "telegram".into();
+        let with_telegram: Vault = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(with_telegram.last_service, Service::Telegram);
+        json["last_service"] = "a-site-from-a-newer-build".into();
+        let newer: Vault = serde_json::from_value(json).unwrap();
+        assert_eq!(newer.last_service, Service::default());
+    }
+
+    #[test]
+    fn cookie_domain_keeps_its_dot() {
+        let c = cookie("sessionid").to_cookie();
+        assert_eq!(c.domain(), Some(".instagram.com"));
+        let back = StoredCookie::from_cookie(&c).unwrap();
+        assert_eq!(back.domain, "instagram.com");
+        assert_eq!(back.expires, Some(4_000_000_000));
+        assert_eq!(back.same_site.as_deref(), Some("Lax"));
+    }
+
+    fn scratch_dir() -> std::path::PathBuf {
+        let tag: String = random::<8>().iter().map(|b| format!("{b:02x}")).collect();
+        let dir = std::env::temp_dir().join(format!("chatly-test-{tag}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn new_vaults_use_the_documented_kdf() {
+        let (vault, _) = Vault::create("pw-for-test").unwrap();
+        assert_eq!(vault.version, FORMAT_VERSION);
+        assert_eq!(vault.kdf.alg, "argon2id");
+        assert_eq!((vault.kdf.m_kib, vault.kdf.t, vault.kdf.p), (64 * 1024, 3, 1));
+        assert_eq!(B64.decode(&vault.kdf.salt).unwrap().len(), 16);
+        assert!(vault.sessions.is_none());
+        assert!(!vault.touch_id);
+    }
+
+    #[test]
+    fn every_vault_gets_its_own_salt_and_key() {
+        let (a, key_a) = Vault::create("same password").unwrap();
+        let (b, key_b) = Vault::create("same password").unwrap();
+        assert_ne!(a.kdf.salt, b.kdf.salt);
+        assert_ne!(*key_a, *key_b);
+        assert_ne!(a.wrapped_key.ct, b.wrapped_key.ct);
+    }
+
+    #[test]
+    fn every_write_uses_a_fresh_nonce() {
+        let (mut vault, key) = Vault::create("pw-for-test").unwrap();
+        vault.write_sessions(&key, &Sessions::new()).unwrap();
+        let first = vault.sessions.clone().unwrap();
+        vault.write_sessions(&key, &Sessions::new()).unwrap();
+        let second = vault.sessions.clone().unwrap();
+        assert_ne!(first.nonce, second.nonce);
+        assert_ne!(first.ct, second.ct);
+    }
+
+    #[test]
+    fn sealed_fields_cannot_be_swapped() {
+        let (mut vault, key) = Vault::create("pw-for-test").unwrap();
+        vault.write_sessions(&key, &Sessions::new()).unwrap();
+        let mut swapped = vault.clone();
+        swapped.sessions = Some(vault.key_check.clone());
+        assert!(swapped.read_sessions(&key).is_err());
+        swapped.key_check = vault.sessions.clone().unwrap();
+        assert!(!swapped.check_key(&key));
+    }
+
+    #[test]
+    fn damaged_kdf_fields_are_errors_not_panics() {
+        let (mut vault, _) = Vault::create("pw-for-test").unwrap();
+        vault.kdf.alg = "scrypt".into();
+        assert!(matches!(vault.unlock("pw-for-test"), Err(Error::Corrupt(_))));
+        let (mut vault, _) = Vault::create("pw-for-test").unwrap();
+        vault.kdf.salt = "%%%".into();
+        assert!(matches!(vault.unlock("pw-for-test"), Err(Error::Corrupt(_))));
+        let (mut vault, _) = Vault::create("pw-for-test").unwrap();
+        vault.wrapped_key.nonce = B64.encode([0u8; 12]);
+        assert!(vault.unlock("pw-for-test").is_err());
+    }
+
+    #[test]
+    fn default_settings_match_the_readme() {
+        let s = Settings::default();
+        assert_eq!(s.auto_lock_minutes, 5);
+        assert!(s.lock_on_screen_lock && s.lock_on_hide && s.hide_from_capture);
+        assert!(s.confirm_links && s.remember_sessions);
+        assert!(!s.lock_on_blur && !s.wipe_after_failures);
+    }
+
+    #[test]
+    fn auto_lock_minutes_are_clamped() {
+        for (given, kept) in [(0, 1), (1, 1), (30, 30), (60, 60), (61, 60), (u32::MAX, 60)] {
+            let s = Settings { auto_lock_minutes: given, ..Settings::default() }.sanitized();
+            assert_eq!(s.auto_lock_minutes, kept, "{given}");
+        }
+    }
+
+    #[test]
+    fn missing_settings_fall_back_to_defaults() {
+        let s: Settings = serde_json::from_str(r#"{"autoLockMinutes": 15, "lockOnBlur": true}"#).unwrap();
+        assert_eq!(s.auto_lock_minutes, 15);
+        assert!(s.lock_on_blur);
+        assert!(s.remember_sessions && s.confirm_links);
+        let json = serde_json::to_value(Settings::default()).unwrap();
+        assert!(json.get("autoLockMinutes").is_some());
+        assert!(json.get("auto_lock_minutes").is_none());
+    }
+
+    #[test]
+    fn vaults_from_older_versions_still_load() {
+        let (vault, key) = Vault::create("pw-for-test").unwrap();
+        let mut json = serde_json::to_value(&vault).unwrap();
+        let fields = json.as_object_mut().unwrap();
+        for optional in ["sessions", "touch_id", "failed_attempts", "lockout_until", "settings", "last_service"] {
+            assert!(fields.remove(optional).is_some(), "{optional}");
+        }
+        let old: Vault = serde_json::from_value(json).unwrap();
+        assert_eq!(*old.unlock("pw-for-test").unwrap(), *key);
+        assert!(old.sessions.is_none());
+        assert!(!old.touch_id);
+        assert_eq!(old.failed_attempts, 0);
+        assert_eq!(old.last_service, Service::Instagram);
+        assert_eq!(old.settings.auto_lock_minutes, 5);
+    }
+
+    #[test]
+    fn saved_vaults_are_private_and_load_back() {
+        let dir = scratch_dir();
+        let path = dir.join("vault.json");
+        let (mut vault, key) = Vault::create("pw-for-test").unwrap();
+        let mut s = Sessions::new();
+        s.insert("instagram".into(), vec![cookie("sessionid")]);
+        vault.write_sessions(&key, &s).unwrap();
+        vault.save(&path).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let files: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        let on_disk = fs::read_to_string(&path).unwrap();
+        let loaded = Vault::load(&path).unwrap().unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(mode, 0o600);
+        assert_eq!(files, ["vault.json"]);
+        assert!(!on_disk.contains("sessionid"));
+        assert_eq!(loaded.read_sessions(&key).unwrap()["instagram"][0].name, "sessionid");
+    }
+
+    #[test]
+    fn missing_vault_means_first_launch_and_garbage_is_corrupt() {
+        let dir = scratch_dir();
+        let path = dir.join("vault.json");
+        let missing = Vault::load(&path);
+        fs::write(&path, b"not json").unwrap();
+        let garbage = Vault::load(&path);
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(matches!(missing, Ok(None)));
+        assert!(matches!(garbage, Err(Error::Corrupt(_))));
+    }
+
+    #[test]
+    fn cookie_expiry() {
+        let mut c = cookie("sessionid");
+        c.expires = None;
+        assert!(!c.is_expired(i64::MAX));
+        c.expires = Some(100);
+        assert!(!c.is_expired(99));
+        assert!(c.is_expired(100));
+        assert!(c.is_expired(101));
+    }
+
+    #[test]
+    fn host_only_cookies_are_not_stored() {
+        let no_domain = cookie::Cookie::build(("a", "b")).path("/").build();
+        assert!(StoredCookie::from_cookie(&no_domain).is_none());
+        let empty_domain = cookie::Cookie::build(("a", "b")).domain(".").build();
+        assert!(StoredCookie::from_cookie(&empty_domain).is_none());
+    }
+
+    #[test]
+    fn cookie_attributes_survive_a_round_trip() {
+        let mut c = cookie("xs");
+        c.same_site = Some("Strict".into());
+        c.expires = None;
+        c.http_only = false;
+        let back = StoredCookie::from_cookie(&c.to_cookie()).unwrap();
+        assert_eq!(back.same_site.as_deref(), Some("Strict"));
+        assert_eq!(back.expires, None);
+        assert!(back.secure);
+        assert!(!back.http_only);
+        assert_eq!(back.path, "/");
+    }
+}

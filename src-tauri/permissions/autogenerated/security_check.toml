@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-security-check"
+description = "Enables the security_check command without any pre-configured scope."
+commands.allow = ["security_check"]
+
+[[permission]]
+identifier = "deny-security-check"
+description = "Denies the security_check command without any pre-configured scope."
+commands.deny = ["security_check"]

@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chatly</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div class="drag" data-tauri-drag-region></div>
+
+  <svg width="0" height="0" class="sprites" aria-hidden="true">
+    <defs>
+      <mask id="keyhole">
+        <rect width="64" height="64" fill="#fff"/>
+        <circle cx="32" cy="27.5" r="4.6" fill="#000"/>
+        <path d="M30.1 29.5h3.8l1.5 9h-6.8z" fill="#000"/>
+      </mask>
+      <symbol id="i-mark" viewBox="0 0 64 64">
+        <g mask="url(#keyhole)" fill="currentColor">
+          <rect x="9" y="12" width="46" height="34" rx="13"/>
+          <path d="M17.5 41h10L13 53.5z"/>
+        </g>
+      </symbol>
+      <symbol id="i-instagram" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3.5" y="3.5" width="17" height="17" rx="5"/>
+        <circle cx="12" cy="12" r="3.9"/>
+        <circle cx="16.9" cy="7.1" r=".6" fill="currentColor" stroke="none"/>
+      </symbol>
+      <symbol id="i-facebook" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="8.6"/>
+        <path d="M15.2 8.3h-1.4a2.4 2.4 0 0 0-2.4 2.4v9.9M9.4 13.4h5"/>
+      </symbol>
+      <symbol id="i-telegram" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20.6 3.4 3.7 10.1a.7.7 0 0 0 0 1.3l6.6 2.3 2.3 6.6a.7.7 0 0 0 1.3 0z"/>
+        <path d="m10.3 13.7 5.1-5.1"/>
+      </symbol>
+      <symbol id="i-sliders" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+        <path d="M4 7.5h9.5M18.5 7.5H20M4 16.5h3.5M12.5 16.5H20"/>
+        <circle cx="16" cy="7.5" r="2.3"/>
+        <circle cx="10" cy="16.5" r="2.3"/>
+      </symbol>
+      <symbol id="i-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="5" y="10.5" width="14" height="10" rx="2.6"/>
+        <path d="M8.3 10.5V8a3.7 3.7 0 0 1 7.4 0v2.5"/>
+      </symbol>
+      <symbol id="i-fingerprint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+        <path d="M6.1 7.4A7.4 7.4 0 0 1 19.4 12c0 1-.1 2-.3 3"/>
+        <path d="M4.6 15.2c.4-1 .6-2.1.6-3.2 0-.8.1-1.5.4-2.2"/>
+        <path d="M8.6 18.9c.6-1.9.9-4.4.9-6.9a2.5 2.5 0 0 1 5 0c0 3-.3 5.7-1 8"/>
+        <path d="M12 12c0 3.4-.4 6.4-1.3 9"/>
+        <path d="M16.9 15.7c-.2 1.6-.6 3.2-1.1 4.6"/>
+      </symbol>
+    </defs>
+  </svg>
+
+  <main id="setup" class="gate" hidden>
+    <div class="gate-card">
+      <div class="mark"><svg><use href="#i-mark"/></svg></div>
+      <h1>Set a password for Chatly</h1>
+      <p class="lede">It encrypts your Instagram, Facebook and Telegram sessions on this Mac. Nobody can open your chats without it, and it can't be recovered if you forget it.</p>
+      <form id="setup-form" autocomplete="off" novalidate>
+        <label class="field">
+          <span>Password</span>
+          <input id="setup-pw" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="off">
+        </label>
+        <div class="meter" id="meter" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+        <p class="hint" id="meter-hint">At least 8 characters. Four random words work well.</p>
+        <label class="field">
+          <span>Type it again</span>
+          <input id="setup-pw2" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="off">
+        </label>
+        <p class="error" id="setup-error" role="alert"></p>
+        <button class="primary" type="submit" id="setup-btn">Create password</button>
+      </form>
+    </div>
+  </main>
+
+  <main id="lock" class="gate" hidden>
+    <div class="gate-card">
+      <div class="mark"><svg><use href="#i-mark"/></svg></div>
+      <h1>Chatly is locked</h1>
+      <p class="lede">Enter your password to open your chats.</p>
+      <form id="unlock-form" autocomplete="off" novalidate>
+        <div class="pw-row">
+          <input id="unlock-pw" type="password" placeholder="Password" aria-label="Password" autocomplete="current-password" spellcheck="false" autocapitalize="off">
+          <button type="button" class="reveal" data-target="unlock-pw">Show</button>
+        </div>
+        <p class="error" id="unlock-error" role="alert"></p>
+        <button class="primary" type="submit" id="unlock-btn">Unlock</button>
+        <button class="secondary with-icon" type="button" id="touchid-btn" hidden>
+          <svg><use href="#i-fingerprint"/></svg>Use Touch ID
+        </button>
+      </form>
+      <div class="forgot">
+        <button class="link" type="button" id="forgot-btn" aria-expanded="false" aria-controls="forgot-panel">Forgot your password?</button>
+        <div id="forgot-panel" class="confirm-box" hidden>
+          <p>It can't be recovered. You can erase Chatly and start over: your saved sessions on this Mac are deleted and you sign in to each site again. Your accounts and messages aren't affected.</p>
+          <label class="field">
+            <span>Type ERASE to confirm</span>
+            <input id="forgot-confirm" autocomplete="off" spellcheck="false" autocapitalize="characters">
+          </label>
+          <button class="danger" type="button" id="forgot-erase" disabled>Erase and start over</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <nav id="rail" aria-label="Chatly" hidden>
+    <div class="rail-top" data-tauri-drag-region></div>
+    <button class="svc" type="button" data-service="instagram" data-name="Instagram" title="Instagram (⌘1)" aria-label="Instagram">
+      <svg><use href="#i-instagram"/></svg><span class="badge" hidden></span>
+    </button>
+    <button class="svc" type="button" data-service="facebook" data-name="Facebook" title="Facebook (⌘2)" aria-label="Facebook">
+      <svg><use href="#i-facebook"/></svg><span class="badge" hidden></span>
+    </button>
+    <button class="svc" type="button" data-service="telegram" data-name="Telegram" title="Telegram (⌘3)" aria-label="Telegram">
+      <svg><use href="#i-telegram"/></svg><span class="badge" hidden></span>
+    </button>
+    <div class="rail-fill" data-tauri-drag-region></div>
+    <button class="tool" type="button" id="settings-btn" title="Settings (⌘,)" aria-label="Settings">
+      <svg><use href="#i-sliders"/></svg>
+    </button>
+    <button class="tool" type="button" id="lock-btn" title="Lock now (⌘L)" aria-label="Lock now">
+      <svg><use href="#i-lock"/></svg>
+    </button>
+  </nav>
+
+  <section id="settings" aria-labelledby="settings-title" hidden>
+    <header class="settings-head" data-tauri-drag-region>
+      <h1 id="settings-title">Settings</h1>
+      <button class="secondary small" type="button" id="settings-done">Done</button>
+    </header>
+    <div class="settings-body">
+
+      <section class="group">
+        <h2>Auto-lock</h2>
+        <div class="card">
+          <div class="row">
+            <div class="row-text">
+              <label for="s-minutes">Lock after</label>
+              <p>Counts time spent in other apps too.</p>
+            </div>
+            <select id="s-minutes" data-setting="autoLockMinutes">
+              <option value="1">1 minute</option>
+              <option value="2">2 minutes</option>
+              <option value="5">5 minutes</option>
+              <option value="10">10 minutes</option>
+              <option value="15">15 minutes</option>
+              <option value="30">30 minutes</option>
+              <option value="60">1 hour</option>
+            </select>
+          </div>
+          <div class="row">
+            <div class="row-text"><label for="s-screen">When the screen locks or the Mac sleeps</label></div>
+            <input id="s-screen" class="switch" type="checkbox" data-setting="lockOnScreenLock">
+          </div>
+          <div class="row">
+            <div class="row-text"><label for="s-hide">When Chatly is minimized or hidden</label></div>
+            <input id="s-hide" class="switch" type="checkbox" data-setting="lockOnHide">
+          </div>
+          <div class="row">
+            <div class="row-text">
+              <label for="s-blur">When you switch to another app</label>
+              <p>The strictest option. You'll unlock more often.</p>
+            </div>
+            <input id="s-blur" class="switch" type="checkbox" data-setting="lockOnBlur">
+          </div>
+        </div>
+      </section>
+
+      <section class="group">
+        <h2>Unlocking</h2>
+        <div class="card">
+          <div class="row">
+            <div class="row-text">
+              <label for="s-touchid">Unlock with Touch ID</label>
+              <p id="touchid-note"></p>
+            </div>
+            <input id="s-touchid" class="switch" type="checkbox">
+          </div>
+          <div class="row">
+            <div class="row-text">
+              <label>Password</label>
+              <p id="pw-status">Encrypts everything Chatly saves.</p>
+            </div>
+            <button class="secondary small" type="button" id="pw-toggle" aria-expanded="false" aria-controls="pw-form">Change…</button>
+          </div>
+          <form id="pw-form" class="subform" autocomplete="off" novalidate hidden>
+            <label class="field"><span>Current password</span><input id="pw-current" type="password" autocomplete="current-password" spellcheck="false"></label>
+            <label class="field"><span>New password</span><input id="pw-next" type="password" autocomplete="new-password" spellcheck="false"></label>
+            <label class="field"><span>Type the new password again</span><input id="pw-next2" type="password" autocomplete="new-password" spellcheck="false"></label>
+            <p class="error" id="pw-error" role="alert"></p>
+            <div class="actions">
+              <button class="secondary small" type="button" id="pw-cancel">Cancel</button>
+              <button class="primary small" type="submit" id="pw-save">Change password</button>
+            </div>
+          </form>
+          <div class="row">
+            <div class="row-text">
+              <label for="s-wipe">Erase after 10 wrong passwords</label>
+              <p>Stops guessing for good. Anyone at your Mac could trigger it, which signs you out.</p>
+            </div>
+            <input id="s-wipe" class="switch" type="checkbox" data-setting="wipeAfterFailures">
+          </div>
+        </div>
+      </section>
+
+      <section class="group">
+        <h2>Privacy</h2>
+        <div class="card">
+          <div class="row">
+            <div class="row-text">
+              <label for="s-capture">Hide from screen sharing and screenshots</label>
+              <p>Most meeting apps and screenshot tools see an empty window.</p>
+            </div>
+            <input id="s-capture" class="switch" type="checkbox" data-setting="hideFromCapture">
+          </div>
+          <div class="row">
+            <div class="row-text">
+              <label for="s-links">Ask before opening links</label>
+              <p>Links from chats open in your default browser, outside Chatly's lock.</p>
+            </div>
+            <input id="s-links" class="switch" type="checkbox" data-setting="confirmLinks">
+          </div>
+          <div class="row">
+            <div class="row-text">
+              <label for="s-remember">Stay signed in</label>
+              <p>Keeps your sessions encrypted on this Mac. Turn off to sign in each time Chatly opens.</p>
+            </div>
+            <input id="s-remember" class="switch" type="checkbox" data-setting="rememberSessions">
+          </div>
+        </div>
+      </section>
+
+      <section class="group">
+        <h2>Accounts</h2>
+        <div class="card">
+          <div class="row">
+            <div class="row-text account"><svg><use href="#i-instagram"/></svg><label>Instagram</label></div>
+            <button class="secondary small" type="button" data-signout="instagram">Sign out</button>
+          </div>
+          <div class="row">
+            <div class="row-text account"><svg><use href="#i-facebook"/></svg><label>Facebook</label></div>
+            <button class="secondary small" type="button" data-signout="facebook">Sign out</button>
+          </div>
+          <div class="row">
+            <div class="row-text account"><svg><use href="#i-telegram"/></svg><label>Telegram</label></div>
+            <button class="secondary small" type="button" data-signout="telegram">Sign out</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="group">
+        <h2>Work laptop check</h2>
+        <div class="card">
+          <div class="row">
+            <div class="row-text">
+              <label>What can see past the lock</label>
+              <p>Chatly keeps people at this Mac out of your chats. It can't hide them from a network that decrypts HTTPS or from monitoring software IT installed.</p>
+            </div>
+            <button class="secondary small" type="button" id="check-btn">Run check</button>
+          </div>
+          <ul id="check-results" class="checks" hidden></ul>
+        </div>
+      </section>
+
+      <section class="group">
+        <h2>Erase</h2>
+        <div class="card">
+          <div class="row">
+            <div class="row-text">
+              <label>Erase everything</label>
+              <p>Signs out of every site, deletes the encrypted vault and the Touch ID key, and removes your password.</p>
+            </div>
+            <button class="secondary small danger-text" type="button" id="erase-toggle" aria-expanded="false" aria-controls="erase-panel">Erase…</button>
+          </div>
+          <div id="erase-panel" class="subform" hidden>
+            <label class="field"><span>Type ERASE to confirm</span><input id="erase-confirm" autocomplete="off" spellcheck="false" autocapitalize="characters"></label>
+            <div class="actions">
+              <button class="danger small" type="button" id="erase-go" disabled>Erase everything</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <p class="footnote">Sessions are encrypted with XChaCha20-Poly1305 under a key derived from your password with Argon2id. Each site runs in its own in-memory browser store and can't reach Chatly itself.</p>
+    </div>
+  </section>
+</body>
+</html>
