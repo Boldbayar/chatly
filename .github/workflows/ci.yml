@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Format and syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+
+      - name: cargo fmt
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+
+      - name: JavaScript syntax
+        run: |
+          node --check ui/app.js
+          node --check src-tauri/src/content.js
+
+      - name: JSON syntax
+        run: |
+          for f in src-tauri/tauri.conf.json src-tauri/capabilities/*.json; do
+            python3 -m json.tool "$f" > /dev/null
+          done
+
+  macos:
+    name: Clippy, tests and build (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c
+        with:
+          workspaces: src-tauri
+
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test --locked --all-features -- --skip guard::tests::session_state_is_readable
+
+      - name: cargo build
+        run: cargo build --locked
+
+      - name: Third-party license list is current
+        run: python3 ../scripts/third_party_licenses.py
+
+      - name: Generated files are committed
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --short
+            git --no-pager diff
+            echo "::error::Building changed tracked files or left new ones. Commit them (see CONTRIBUTING.md)."
+            exit 1
+          fi

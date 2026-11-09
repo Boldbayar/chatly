@@ -1121,4 +1121,97 @@ mod tests {
         assert_eq!(human_duration(60), "1 minute");
         assert_eq!(human_duration(240), "4 minutes");
     }
+
+    #[test]
+    fn unread_counts_ignore_anything_unexpected() {
+        assert_eq!(unread_count(""), 0);
+        assert_eq!(unread_count("  (4) Instagram"), 4);
+        assert_eq!(unread_count("( 7 ) Facebook"), 7);
+        assert_eq!(unread_count("(abc) Facebook"), 0);
+        assert_eq!(unread_count("(-1) Facebook"), 0);
+        assert_eq!(unread_count("(5 Facebook"), 0);
+        assert_eq!(unread_count("(99999999999) Facebook"), 0);
+    }
+
+    #[test]
+    fn durations_round_up_to_whole_minutes() {
+        assert_eq!(human_duration(0), "0 seconds");
+        assert_eq!(human_duration(59), "59 seconds");
+        assert_eq!(human_duration(119), "1 minute");
+        assert_eq!(human_duration(120), "2 minutes");
+        assert_eq!(human_duration(121), "3 minutes");
+        assert_eq!(human_duration(3600), "60 minutes");
+    }
+
+    #[test]
+    fn new_passwords_are_counted_in_characters() {
+        assert!(check_new_password("1234567").is_err());
+        assert!(check_new_password("12345678").is_ok());
+        assert!(check_new_password("ПарольПа").is_ok());
+        assert!(check_new_password("🔒🔒🔒🔒🔒🔒🔒").is_err());
+        assert!(check_new_password(&"x".repeat(1024)).is_ok());
+        assert!(check_new_password(&"x".repeat(1025)).is_err());
+    }
+
+    fn quoted(text: &str) -> Vec<String> {
+        text.split('"').skip(1).step_by(2).map(str::to_string).collect()
+    }
+
+    fn capability() -> serde_json::Value {
+        serde_json::from_str(include_str!("../capabilities/shell.json")).unwrap()
+    }
+
+    #[test]
+    fn every_command_is_declared_in_all_three_places() {
+        let mut declared = include_str!("../build.rs")
+            .split_once("COMMANDS: &[&str] = &[")
+            .and_then(|(_, rest)| rest.split_once("];"))
+            .map(|(list, _)| quoted(list))
+            .expect("COMMANDS in build.rs");
+        let mut handled: Vec<String> = include_str!("main.rs")
+            .split_once("tauri::generate_handler![")
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .map(|(list, _)| {
+                list.split(',')
+                    .map(str::trim)
+                    .filter(|c| !c.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .expect("generate_handler! in main.rs");
+        let mut granted: Vec<String> = capability()["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.as_str()?.strip_prefix("allow-").map(|c| c.replace('-', "_")))
+            .collect();
+        declared.sort();
+        handled.sort();
+        granted.sort();
+        assert!(!declared.is_empty());
+        assert_eq!(declared, handled, "build.rs COMMANDS and generate_handler! differ");
+        assert_eq!(declared, granted, "build.rs COMMANDS and capabilities/shell.json differ");
+    }
+
+    #[test]
+    fn only_the_local_shell_can_call_rust() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities");
+        let capabilities: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".json"))
+            .collect();
+        assert_eq!(capabilities, ["shell.json"]);
+        let cap = capability();
+        assert_eq!(cap["webviews"], serde_json::json!([SHELL]));
+        assert_eq!(cap["local"], true);
+        assert!(cap.get("remote").is_none());
+        assert!(cap.get("windows").is_none());
+        let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(config["app"]["withGlobalTauri"], false);
+        let csp = &config["app"]["security"]["csp"];
+        assert_eq!(csp["script-src"], "'self'");
+        assert_eq!(csp["frame-src"], "'none'");
+        assert_eq!(csp["connect-src"], "ipc: http://ipc.localhost");
+    }
 }

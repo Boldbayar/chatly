@@ -13,9 +13,19 @@ export CARGO_ENCODED_RUSTFLAGS
 
 cargo tauri build --bundles app "$@"
 
-binary=target/release/chatly
-if strings "$binary" | grep -qF "$HOME"; then
-  echo "error: $binary still contains $HOME; do not publish it" >&2
+binaries=$(find target -path '*/release/bundle/macos/Chatly.app/Contents/MacOS/*' -type f 2> /dev/null || true)
+if [ -z "$binaries" ]; then
+  echo "error: no Chatly.app found under target/ to check; do not publish this build" >&2
   exit 1
 fi
-echo "Built target/release/bundle/macos/Chatly.app (no home-directory paths inside)"
+for binary in $binaries; do
+  if ! strings "$binary" > /dev/null; then
+    echo "error: couldn't read $binary; do not publish it" >&2
+    exit 1
+  fi
+  if strings "$binary" | grep -qF "$HOME"; then
+    echo "error: $binary still contains $HOME; do not publish it" >&2
+    exit 1
+  fi
+  echo "Checked $binary: no home-directory paths inside"
+done

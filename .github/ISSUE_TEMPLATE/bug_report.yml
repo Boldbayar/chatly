@@ -1,0 +1,76 @@
+name: Bug report
+description: Something in Chatly doesn't work as described in the README.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security problems don't go here.** If the bug lets someone read chats, bypass the lock, or reach Chatly from a web page, report it privately as described in [SECURITY.md](https://github.com/Boldbayar/chatly/blob/main/SECURITY.md).
+
+        Never paste passwords, cookies, the contents of `vault.json`, or screenshots of real chats.
+
+  - type: input
+    id: version
+    attributes:
+      label: Chatly version
+      description: The commit you built from (`git rev-parse --short HEAD`), and the version under Chatly → About Chatly.
+      placeholder: "a1b2c3d, 0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      description: Apple menu → About This Mac.
+      placeholder: "macOS 26.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: arch
+    attributes:
+      label: Hardware architecture
+      options:
+        - Apple silicon
+        - Intel
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Unlock Chatly
+        2. Open Facebook
+        3. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Run Chatly from source with `cargo run` in `src-tauri/`, reproduce the bug, and paste the lines that start with `chatly:`. Check them for anything personal first.
+      render: text
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: Chatly hides its window from screenshots by default. To take one, turn off Settings → Privacy → Hide from screen sharing for a moment. Don't include real chats.

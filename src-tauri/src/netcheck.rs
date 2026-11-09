@@ -170,3 +170,30 @@ fn classify(e: io::Error) -> Failure {
         None => Failure::Unreachable(e.to_string()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn certificate(e: CertificateError) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, rustls::Error::InvalidCertificate(e))
+    }
+
+    #[test]
+    fn certificate_errors_mean_interception() {
+        let unknown = classify(certificate(CertificateError::UnknownIssuer));
+        assert!(matches!(unknown, Failure::Intercepted(why) if why.contains("public certificate authority")));
+        let wrong_name = classify(certificate(CertificateError::NotValidForName));
+        assert!(matches!(wrong_name, Failure::Intercepted(why) if why.contains("different name")));
+        let expired = classify(certificate(CertificateError::Expired));
+        assert!(matches!(expired, Failure::Intercepted(why) if why.starts_with("was rejected")));
+    }
+
+    #[test]
+    fn network_errors_are_not_called_interception() {
+        let refused = io::Error::new(io::ErrorKind::ConnectionRefused, "refused");
+        assert!(matches!(classify(refused), Failure::Unreachable(_)));
+        let other_tls = io::Error::new(io::ErrorKind::InvalidData, rustls::Error::DecryptError);
+        assert!(matches!(classify(other_tls), Failure::Unreachable(_)));
+    }
+}

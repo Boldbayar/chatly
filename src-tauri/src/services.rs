@@ -271,4 +271,115 @@ mod tests {
         let bare = strip_tracking(u("https://example.com/p?fbclid=abc"));
         assert_eq!(bare.as_str(), "https://example.com/p");
     }
+
+    #[test]
+    fn service_ids_round_trip() {
+        let mut ids = std::collections::HashSet::new();
+        for svc in Service::ALL {
+            assert!(ids.insert(svc.id()), "duplicate id {}", svc.id());
+            assert_eq!(Service::from_id(svc.id()), Some(svc));
+            assert_eq!(svc.label(), format!("svc-{}", svc.id()));
+            let json = format!("\"{}\"", svc.id());
+            assert_eq!(serde_json::to_string(&svc).unwrap(), json);
+            assert_eq!(serde_json::from_str::<Service>(&json).unwrap(), svc);
+        }
+        assert_eq!(Service::from_id("twitter"), None);
+        assert!(serde_json::from_str::<Service>("\"Instagram\"").is_err());
+        assert_eq!(Service::default(), Service::Instagram);
+    }
+
+    #[test]
+    fn site_pages_load_in_app() {
+        for svc in Service::ALL {
+            for url in [svc.home(), svc.messages()] {
+                assert_eq!(url.scheme(), "https");
+                assert!(svc.owns(&url) && allowed_in_app(svc, &url), "{url}");
+            }
+        }
+    }
+
+    #[test]
+    fn content_script_lists_the_same_domains() {
+        assert_eq!(include_str!("content.js").matches(LINK_DOMAINS_SLOT).count(), 1);
+        for svc in Service::ALL {
+            let script = svc.content_script();
+            let list = script
+                .split_once("const OWN = ")
+                .and_then(|(_, rest)| rest.split_once(';'))
+                .map(|(list, _)| list)
+                .expect("the OWN list in content.js");
+            let from_js: Vec<String> = serde_json::from_str(list).expect("a JSON list of domains");
+            assert_eq!(from_js, svc.link_domains(), "{}", svc.id());
+        }
+    }
+
+    #[test]
+    fn lookalike_hosts_are_refused() {
+        for svc in [Service::Instagram, Service::Facebook] {
+            assert!(svc.owns(&u("https://WWW.FACEBOOK.COM/")));
+            assert!(!svc.owns(&u("https://www.facebook.com@evil.example/")));
+            assert!(!svc.owns(&u("https://evil.example/www.facebook.com")));
+            assert!(!svc.owns(&u("https://xfacebook.com/")));
+            assert!(!svc.owns(&u("https://facebook.com-evil.example/")));
+            assert!(!svc.owns(&u("wss://www.facebook.com/")));
+        }
+        let tg = Service::Telegram;
+        assert!(tg.owns(&u("https://WEB.TELEGRAM.ORG/a/")));
+        assert!(!tg.owns(&u("https://web.telegram.org@evil.example/")));
+        assert!(!tg.owns(&u("https://web.telegram.org-evil.example/")));
+        assert!(!tg.owns(&u("wss://web.telegram.org/")));
+    }
+
+    #[test]
+    fn captcha_frames_only_from_captcha_hosts() {
+        for svc in Service::ALL {
+            assert!(allowed_in_app(svc, &u("https://www.gstatic.com/recaptcha/releases/x/recaptcha__en.js")));
+            assert!(allowed_in_app(svc, &u("https://www.recaptcha.net/recaptcha/api2/anchor")));
+            assert!(allowed_in_app(svc, &u("https://newassets.hcaptcha.com/captcha/v1/x")));
+            assert!(allowed_in_app(svc, &u("https://client-api.arkoselabs.com/fc/gc/")));
+            assert!(!allowed_in_app(svc, &u("http://www.google.com/recaptcha/api2/anchor")));
+            assert!(!allowed_in_app(svc, &u("https://www.gstatic.com/images/x.png")));
+            assert!(!allowed_in_app(svc, &u("https://www.google.com/recaptcha-evil/")));
+            assert!(!allowed_in_app(svc, &u("https://hcaptcha.com.evil.example/")));
+        }
+    }
+
+    #[test]
+    fn special_urls_are_refused_unless_listed() {
+        for svc in Service::ALL {
+            assert!(allowed_in_app(svc, &u("about:srcdoc")));
+            assert!(!allowed_in_app(svc, &u("about:config")));
+            assert!(!allowed_in_app(svc, &u("blob:http://www.facebook.com/1234")));
+            assert!(!allowed_in_app(svc, &u("blob:http://web.telegram.org/1234")));
+            assert!(!allowed_in_app(svc, &u("blob:null/1234")));
+            assert!(!allowed_in_app(svc, &u("javascript:alert(1)")));
+            assert!(!allowed_in_app(svc, &u("tauri://localhost/index.html")));
+            assert!(!allowed_in_app(svc, &u("http://www.instagram.com/")));
+            assert!(!allowed_in_app(svc, &u("http://web.telegram.org/a/")));
+        }
+    }
+
+    #[test]
+    fn every_shim_host_is_unwrapped() {
+        for host in ["l.instagram.com", "l.facebook.com", "lm.facebook.com", "l.messenger.com"] {
+            let shim = u(&format!("https://{host}/l.php?u=https%3A%2F%2Fexample.com%2F"));
+            assert_eq!(unwrap_link_shim(&shim).unwrap().as_str(), "https://example.com/", "{host}");
+        }
+        let http = unwrap_link_shim(&u("https://l.facebook.com/l.php?u=http%3A%2F%2Fexample.com%2F")).unwrap();
+        assert_eq!(http.scheme(), "http");
+        assert!(unwrap_link_shim(&u("https://l.facebook.com/l.php?h=AT1")).is_none());
+        assert!(unwrap_link_shim(&u("https://l.facebook.com/l.php?u=%2Frelative")).is_none());
+        assert!(unwrap_link_shim(&u("https://l.facebook.com/l.php?u=file%3A%2F%2F%2Fetc%2Fpasswd")).is_none());
+        assert!(unwrap_link_shim(&u("https://l.instagram.com.evil.example/?u=https://x.y")).is_none());
+    }
+
+    #[test]
+    fn tracking_removal_keeps_everything_else() {
+        let plain = strip_tracking(u("https://example.com/a#frag"));
+        assert_eq!(plain.as_str(), "https://example.com/a#frag");
+        let cleaned = strip_tracking(u("https://example.com/a?igshid=1&q=x&q=y&fbclid=2#top"));
+        assert_eq!(cleaned.as_str(), "https://example.com/a?q=x&q=y#top");
+        let spaces = strip_tracking(u("https://example.com/s?q=a+b&fbclid=1"));
+        assert_eq!(spaces.query_pairs().find(|(k, _)| k == "q").unwrap().1, "a b");
+    }
 }

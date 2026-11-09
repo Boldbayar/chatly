@@ -4,17 +4,42 @@ Instagram, Facebook and Telegram in a separate macOS app that only you can unloc
 
 > Chatly is an independent open-source project. It is not affiliated with, endorsed by, or sponsored by Meta Platforms, Inc. or Telegram. Instagram and Facebook are trademarks of Meta Platforms, Inc. Telegram is a trademark of its owner. Chatly loads the regular instagram.com, facebook.com and web.telegram.org websites. Using them through Chatly is still subject to each site's terms.
 
-- [Why not just use a browser?](#why-not-just-use-a-browser)
-- [Install](#install)
+Chatly is for people who read personal messages on a shared or work Mac. It keeps Instagram, Facebook and Telegram behind a password or Touch ID, locks itself when you step away, and saves your sessions only in an encrypted vault. It doesn't change what Instagram, Facebook or Telegram can do, and it can't hide your chats from software or a network your employer controls ([details](#what-it-cant-protect-against)).
+
+- [Screenshots](#screenshots)
+- [Features](#features)
+- [Security and privacy](#security-and-privacy)
+- [Installation](#installation)
+- [Getting started](#getting-started)
 - [Using Chatly](#using-chatly)
-- [How the lock works](#how-the-lock-works)
-- [What it can't protect against](#what-it-cant-protect-against)
 - [Limits](#limits)
 - [Troubleshooting](#troubleshooting)
+- [Development](#development)
+- [Architecture overview](#architecture-overview)
+- [Roadmap](#roadmap)
 - [Contributing](#contributing)
+- [Reporting a security vulnerability](#reporting-a-security-vulnerability)
 - [License](#license)
 
-## Why not just use a browser?
+## Screenshots
+
+Screenshots will be added before the first release.
+
+## Features
+
+- **Password lock.** Your password, run through Argon2id, unlocks the encrypted vault. There is no recovery.
+- **Encrypted vault.** Your sessions are saved encrypted with XChaCha20-Poly1305: the sites' cookies, and the sign-in data Telegram keeps in its local storage. Other browsing data stays in memory.
+- **Touch ID.** Optional, fingerprint only. It turns itself off if your enrolled fingers change.
+- **Auto-lock.** On idle, screen lock, sleep, minimize and hide, and optionally whenever you switch apps. Pointer movement doesn't count as activity.
+- **Guessing protection.** Growing delays after 5 wrong passwords, and an optional erase after 10.
+- **Isolated sites.** Each site runs in its own private, in-memory WebKit view with no extensions and no sync. The sites can't call into Chatly, and camera and microphone are blocked.
+- **Careful links.** Links to other sites open in your default browser, after a confirmation, without Meta's redirect and tracking parameters.
+- **Hidden from screen sharing.** The window is excluded from screen capture.
+- **Work laptop check.** Reports device management, proxies, and networks that decrypt HTTPS.
+
+## Security and privacy
+
+### Why not just use a browser?
 
 On a work laptop, the browser is the worst place for personal chats:
 
@@ -26,9 +51,32 @@ Chatly runs each site in its own embedded WebKit view with a **private, in-memor
 
 Links *from* chats to other sites open in your default browser (Chatly asks first), because Chatly only lets each site's own pages load inside it (Meta's for Instagram and Facebook).
 
-## Install
+### How the lock works
 
-Chatly is distributed as source. You build it on the Mac you'll use it on.
+| | |
+|---|---|
+| **Password** | Argon2id (64 MiB, 3 passes) turns it into a key that unwraps a random 256-bit vault key. |
+| **Vault** | Your Instagram and Facebook cookies, and Telegram's cookies and small local storage items (where Telegram keeps its sign-in), encrypted with XChaCha20-Poly1305. Saved when you lock, when you quit, and every 10 minutes. |
+| **Locking** | Chats are hidden and their media paused, the lock screen fills the window, keyboard focus moves to it, and the vault key is dropped from memory. |
+| **Auto-lock** | See [Settings](#settings). Pointer movement doesn't count as activity, so a mouse jiggler can't keep Chatly open. |
+| **Touch ID** | Biometrics only. The vault key is stored in your login keychain together with a fingerprint of your enrolled fingers. If those change, the stored key is rejected. |
+| **Screen sharing** | The window is excluded from screen capture. |
+| **Isolation** | Only Chatly's own UI can call into Rust. No permission covers the site views, so every call from them is refused (the self-test checks this from instagram.com). Instagram and Facebook load only Meta's domains, and Telegram only web.telegram.org, so the Telegram view can't load Instagram in place, or the other way round. Camera and microphone are blocked. |
+
+### What it can't protect against
+
+Chatly stops **people using your Mac**. It doesn't stop **your employer's infrastructure**, or anyone who controls your macOS account:
+
+- **HTTPS inspection.** Many company networks decrypt HTTPS with a certificate that IT installed. Every app on the Mac, Chatly included, can then be read by the network. The [Work laptop check](#work-laptop-check) tests for this.
+- **Monitoring software** installed by IT (screen recording, keyloggers, EDR) sees what you see.
+- **Your login keychain.** Touch ID is enforced by Chatly, not by the Secure Enclave. Anyone who has your Mac login password, or software running as you that the keychain trusts, can read the Touch ID copy of the vault key without a fingerprint. If that matters, leave Touch ID off.
+- **A copy of the vault file.** The wrong-password delays only apply inside Chatly. Someone who copies `vault.json` can guess offline, slowed only by Argon2id. A long password is what protects you.
+
+See [SECURITY.md](SECURITY.md) for the full threat model, implementation details, known limitations and open findings.
+
+## Installation
+
+Chatly is distributed as source. You build it on the Mac you'll use it on. There are no prebuilt downloads.
 
 ### Requirements
 
@@ -36,17 +84,19 @@ Chatly is distributed as source. You build it on the Mac you'll use it on.
 |---|---|---|---|
 | macOS | 13 Ventura or later, Apple silicon or Intel | Apple menu → About This Mac | |
 | Xcode Command Line Tools | any recent | `xcode-select -p` | `xcode-select --install` |
-| Rust | 1.85 or later | `rustc --version` | [rustup.rs](https://rustup.rs) |
+| Rust | 1.90 or later | `rustc --version` | [rustup.rs](https://rustup.rs) |
 | Tauri CLI | 2.x | `cargo tauri --version` | `cargo install tauri-cli --version "^2" --locked` |
 
 No Node.js or npm is needed. Chatly's UI is plain HTML, CSS and JavaScript.
+
+The build is for the kind of Mac you build it on (Apple silicon or Intel). macOS 13 is the minimum set in `src-tauri/tauri.conf.json`. Chatly doesn't run on Windows or Linux.
 
 ### Build and install
 
 1. Get the source:
 
    ```bash
-   git clone <repository-url> chatly
+   git clone https://github.com/Boldbayar/chatly.git
    ```
 
    ```bash
@@ -93,7 +143,7 @@ Your password and saved sessions are kept: they live in `~/Library/Application S
 
 If you can't unlock Chatly anymore, use **Forgot your password?** on the lock screen instead of step 1.
 
-## Using Chatly
+## Getting started
 
 ### First launch
 
@@ -110,6 +160,14 @@ If you can't unlock Chatly anymore, use **Forgot your password?** on the lock sc
 - Type your password and press Return.
 - Or choose **Use Touch ID** if you turned it on in Settings. When Chatly starts, it asks for your fingerprint right away.
 - After 5 wrong passwords, Chatly makes you wait 30 seconds before the next try. Each further miss doubles the wait, up to 1 hour.
+
+### Forgot your password
+
+1. On the lock screen, choose **Forgot your password?**.
+2. Type `ERASE` and choose **Erase and start over**.
+3. Set a new password and sign in to each site again.
+
+## Using Chatly
 
 ### The rail
 
@@ -177,45 +235,16 @@ Open with the sliders icon or ⌘,. Every change is saved immediately.
 
 If anything is flagged, use your phone for anything private.
 
-### Forgot your password
-
-1. On the lock screen, choose **Forgot your password?**.
-2. Type `ERASE` and choose **Erase and start over**.
-3. Set a new password and sign in to each site again.
-
 ### Where your data is
 
 | What | Where |
 |---|---|
 | Encrypted vault (cookies, Telegram's sign-in data, settings) | `~/Library/Application Support/com.chatly.desktop/vault.json`, readable only by your user (mode 600) |
 | Touch ID copy of the vault key (only if Touch ID is on) | Login keychain, item "Chatly" / "touch-id-unlock-key" |
-| A vault that couldn't be read | Set aside as `vault.damaged-<time>.json` in the same folder. Chatly then starts fresh. |
+| A vault that couldn't be read | Set aside as `vault.damaged-<time>.json` in the same folder. Chatly then starts fresh. Erase doesn't delete these copies; delete them yourself once you no longer need them. |
 | Files you download from chats | Your Downloads folder, **not encrypted** |
 
 Nothing else is written to disk. Browsing data (cache, local storage, IndexedDB) lives in memory and is gone when Chatly quits. The one exception is Telegram's small local storage items, which hold its sign-in: Chatly copies them into the encrypted vault, never to a file of their own.
-
-## How the lock works
-
-| | |
-|---|---|
-| **Password** | Argon2id (64 MiB, 3 passes) turns it into a key that unwraps a random 256-bit vault key. |
-| **Vault** | Your Instagram and Facebook cookies, and Telegram's cookies and small local storage items (where Telegram keeps its sign-in), encrypted with XChaCha20-Poly1305. Saved when you lock, when you quit, and every 10 minutes. |
-| **Locking** | Chats are hidden and their media paused, the lock screen fills the window, keyboard focus moves to it, and the vault key is dropped from memory. |
-| **Auto-lock** | See [Settings](#settings). Pointer movement doesn't count as activity, so a mouse jiggler can't keep Chatly open. |
-| **Touch ID** | Biometrics only. The vault key is stored in your login keychain together with a fingerprint of your enrolled fingers. If those change, the stored key is rejected. |
-| **Screen sharing** | The window is excluded from screen capture. |
-| **Isolation** | Only Chatly's own UI can call into Rust. No permission covers the site views, so every call from them is refused (the self-test checks this from instagram.com). Instagram and Facebook load only Meta's domains, and Telegram only web.telegram.org, so the Telegram view can't load Instagram in place, or the other way round. Camera and microphone are blocked. |
-
-## What it can't protect against
-
-Chatly stops **people using your Mac**. It doesn't stop **your employer's infrastructure**, or anyone who controls your macOS account:
-
-- **HTTPS inspection.** Many company networks decrypt HTTPS with a certificate that IT installed. Every app on the Mac, Chatly included, can then be read by the network. The [Work laptop check](#work-laptop-check) tests for this.
-- **Monitoring software** installed by IT (screen recording, keyloggers, EDR) sees what you see.
-- **Your login keychain.** Touch ID is enforced by Chatly, not by the Secure Enclave. Anyone who has your Mac login password, or software running as you that the keychain trusts, can read the Touch ID copy of the vault key without a fingerprint. If that matters, leave Touch ID off.
-- **A copy of the vault file.** The wrong-password delays only apply inside Chatly. Someone who copies `vault.json` can guess offline, slowed only by Argon2id. A long password is what protects you.
-
-See [SECURITY.md](SECURITY.md) for the full list and how to report a vulnerability.
 
 ## Limits
 
@@ -246,6 +275,8 @@ SDKROOT = "/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk"
 
 `.cargo/` is git-ignored, so this stays on your Mac. Delete it once the tools are updated.
 
+**The build says a package requires a newer rustc.** Update Rust with `rustup update stable`. Chatly needs Rust 1.90 or later.
+
 **macOS says Chatly "can't be opened".** The build came from another Mac. Build it yourself. Only if you trust whoever built it: System Settings → Privacy & Security → **Open Anyway**.
 
 **Touch ID turned itself off.** Your fingerprints changed in System Settings, or the keychain item was removed. Unlock with your password and turn Touch ID on again.
@@ -254,9 +285,85 @@ SDKROOT = "/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk"
 
 **A link doesn't open.** Only `http` and `https` links leave Chatly. Other link types (such as `mailto:` or app links) are ignored on purpose.
 
+## Development
+
+Install the [requirements](#requirements), then work in `src-tauri/`:
+
+```bash
+cd chatly/src-tauri
+```
+
+```bash
+cargo run
+```
+
+`cargo run` builds a debug version and opens it. **It uses the same data folder as an installed Chatly**, so it opens your real vault. [CONTRIBUTING.md](CONTRIBUTING.md#set-up) shows how to set it aside while you develop.
+
+Before you open a pull request, run what CI runs:
+
+```bash
+cargo fmt --all -- --check
+```
+
+```bash
+cargo clippy --locked --all-targets --all-features -- -D warnings
+```
+
+```bash
+cargo test --locked --all-features
+```
+
+There is no frontend build step: edit `ui/` and run `cargo run` again. CONTRIBUTING.md also covers the end-to-end self-test, manual checks and release builds.
+
+## Architecture overview
+
+```
+┌──────────────────────── window "main" ─────────────────────────┐
+│┌──────┐┌──────────────────────────────────────────────────────┐│
+││shell ││ svc-instagram (or -facebook, -telegram; one shown)   ││
+││ ui/  ││ https://www.instagram.com/                           ││
+││ can  ││ private in-memory WebKit store, content.js injected  ││
+││ call ││ can NOT call Rust                                    ││
+││ Rust ││                                                      ││
+│└──────┘└──────────────────────────────────────────────────────┘│
+└────────────────────────────────────────────────────────────────┘
+```
+
+- **`shell`** shows Chatly's own UI from `ui/`: the lock screen, the rail and Settings. It is the only webview granted any command (`src-tauri/capabilities/shell.json`). It renders the state that Rust sends it and keeps none of its own.
+- **Site webviews** load Instagram, Facebook and Telegram in private, in-memory WebKit stores. They can't call Rust. A navigation allowlist (`services.rs`) keeps each on its own site's domains (Meta's for Instagram and Facebook, web.telegram.org for Telegram), and `content.js` blocks camera and microphone and sends outbound links through Chatly's confirmation.
+- **Rust** (`src-tauri/src/`) owns all state and every decision:
+
+  | Module | Responsibility |
+  |---|---|
+  | `main.rs` | Window, webviews, locking, commands, menu, auto-lock |
+  | `vault.rs` | Argon2id key derivation, XChaCha20-Poly1305 encryption, settings, stored cookies and site storage |
+  | `services.rs` | The sites, their URLs, the domain allowlist, link unwrapping |
+| `storage.rs` | Reading and restoring a site's local storage, where Telegram keeps its sign-in |
+  | `biometric.rs` | Touch ID and the keychain |
+  | `guard.rs` | Input and screen-lock signals for auto-lock |
+  | `netcheck.rs` | Work laptop check |
+  | `selftest.rs` | End-to-end self-test (debug builds only) |
+
+[CONTRIBUTING.md](CONTRIBUTING.md#how-chatly-works) explains the lifecycle, the vault format, the lock order between threads, and the rules that keep this secure.
+
+## Roadmap
+
+These are directions, not commitments or dates:
+
+- **Signed releases.** Developer ID signing and notarization, so prebuilt apps can be published with checksums. Until then, Chatly is source-only.
+- **Touch ID bound to hardware.** Storing the key in the data-protection keychain with biometric access control, which also needs a signing identity ([SECURITY.md](SECURITY.md#known-limitations)).
+- **Open security findings.** Fixing the items listed under [Open findings](SECURITY.md#open-findings).
+- **More sites.** Telegram is the first site from outside Meta. The code supports adding more ([CONTRIBUTING.md](CONTRIBUTING.md#add-a-site)).
+
+Ideas and discussion are welcome in [GitHub Discussions](https://github.com/Boldbayar/chatly/discussions) or a [feature request](https://github.com/Boldbayar/chatly/issues/new/choose).
+
 ## Contributing
 
-[CONTRIBUTING.md](CONTRIBUTING.md) explains how the code is organized, the rules that keep it secure, and step-by-step recipes for common changes: adding a command, a setting, a site or a shortcut.
+[CONTRIBUTING.md](CONTRIBUTING.md) explains how the code is organized, the rules that keep it secure, the branch and pull request workflow, and step-by-step recipes for common changes: adding a command, a setting, a site or a shortcut. Every change goes through a pull request, and CI must pass before it's merged.
+
+## Reporting a security vulnerability
+
+Please **don't open a public issue** for a security problem. Report it privately through the repository's **Security** tab → **Report a vulnerability**. [SECURITY.md](SECURITY.md) says what to include and what is in scope.
 
 ## License
 

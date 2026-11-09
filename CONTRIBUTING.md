@@ -19,7 +19,9 @@ Chatly is a security tool. A small mistake (a wrong capability, a domain added t
   - [Change the vault format](#change-the-vault-format)
   - [Change the UI](#change-the-ui)
 - [Testing](#testing)
+- [Branches, commits and pull requests](#branches-commits-and-pull-requests)
 - [Release builds](#release-builds)
+  - [Release checklist](#release-checklist)
 - [Updating dependencies](#updating-dependencies)
 - [Code style](#code-style)
 - [Pull request checklist](#pull-request-checklist)
@@ -29,7 +31,7 @@ Chatly is a security tool. A small mistake (a wrong capability, a domain added t
 Install the requirements from the [README](README.md#requirements), then:
 
 ```bash
-git clone <repository-url> chatly
+git clone https://github.com/Boldbayar/chatly.git
 ```
 
 ```bash
@@ -66,12 +68,17 @@ If linking fails with an SDK error, see [Troubleshooting](README.md#troubleshoot
 
 ```
 chatly/
+├── .github/
+│   ├── workflows/ci.yml         Continuous integration (see "Continuous integration")
+│   ├── ISSUE_TEMPLATE/          Bug report and feature request forms
+│   └── PULL_REQUEST_TEMPLATE.md
 ├── ui/                          Chatly's own UI: lock screen, rail, settings
 │   ├── index.html               All screens, plus the SVG icon sprites
 │   ├── styles.css
 │   └── app.js                   Renders state from Rust, calls Rust commands
 ├── src-tauri/
 │   ├── Cargo.toml               Rust dependencies
+│   ├── rustfmt.toml             Formatting rules for cargo fmt
 │   ├── tauri.conf.json          App name, identifier, version, CSP for ui/, bundle settings
 │   ├── build.rs                 List of commands that exist (see "Add a command")
 │   ├── capabilities/shell.json  The only grant of commands: to the "shell" webview
@@ -90,7 +97,10 @@ chatly/
 ├── scripts/
 │   ├── build-release.sh         Release build without your home path in the binary
 │   └── third_party_licenses.py  Regenerates THIRD_PARTY_LICENSES.md
+├── AGENTS.md                    Rules for coding agents (CLAUDE.md imports it)
+├── CLAUDE.md
 ├── README.md                    For users
+├── CHANGELOG.md                 What changed in each release
 ├── CONTRIBUTING.md              This file
 ├── SECURITY.md                  Threat model, known limitations, reporting
 ├── LICENSE                      MIT
@@ -508,13 +518,14 @@ cargo test
 
 | Area | Tests |
 |---|---|
-| `vault.rs` | Password round trip and rejection, sessions and site storage encrypted and bound to the key, the two can't be swapped, tampering detected, password change keeps data, older vaults and unknown last sites load, lockout timing, cookie domain dot |
-| `services.rs` | Meta and Telegram hosts and lookalikes, the in-app allowlist per site, sites can't load each other, link domains cover domains, each site's content script, link unwrapping, tracking removal |
+| `vault.rs` | Password round trip and rejection, the KDF parameters, a fresh salt, key and nonce every time, sessions and site storage encrypted and bound to the key, tampering detected, encrypted fields can't be swapped (sessions and storage included), damaged fields are errors and not crashes, password change keeps data, lockout timing, settings defaults and clamping, older vaults and unknown last sites still load, the vault file is mode 600 and loads back, cookie expiry and attributes, cookie domain dot |
+| `services.rs` | Site ids and labels, Meta and Telegram hosts and lookalikes, the in-app allowlist per site, sites can't load each other, captcha hosts, special URL schemes, link domains cover domains, link unwrapping, tracking removal, and rule 4 (each site's `content.js` gets exactly its `link_domains()`, and the file hard-codes none) |
 | `storage.rs` | Parsing what the read script returns, unusable results, per-item and total caps, origin checks, values with quotes, backslashes and `</script>` survive the restore script |
-| `main.rs` | Unread count parsing, duration text |
-| `guard.rs` | Screen-lock state is readable. **Fails if run while the screen is locked or over SSH.** |
+| `main.rs` | Unread count parsing, duration text, password length in characters, rule 1 (only the local shell has a capability, `withGlobalTauri` is off, the CSP is strict) and rule 2 (every command is in `build.rs`, `generate_handler!` and `shell.json`) |
+| `netcheck.rs` | Certificate errors count as interception, network errors don't |
+| `guard.rs` | Screen-lock state is readable. **Fails if run while the screen is locked or over SSH.** CI skips it. |
 
-Add a test for every rule you encode: a new domain, a new setting's clamping, a new parser.
+**Every change in behavior comes with a unit test**, added before you commit: a new function, domain, setting, parser or command, and every bug fix (with a test that fails without the fix). Put it in the `#[cfg(test)] mod tests` of the module you changed. Only changes with no effect on behavior, such as documentation or formatting, are exempt. If a rule test fails, fix the code: never weaken, `#[ignore]` or delete a test to get a change through. [AGENTS.md](AGENTS.md) gives coding agents the same rule.
 
 ### End-to-end self-test
 
@@ -541,17 +552,164 @@ Before a pull request that touches locking, Touch ID, links or the window, run t
 - [ ] Quit and reopen: still signed in to every site.
 - [ ] Sign in to Telegram by QR code. Lock and unlock, then quit and reopen: still signed in. Sign out of Telegram in Settings: only Telegram is signed out.
 
+### Continuous integration
+
+Every pull request to `main`, and every push to it, runs [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
+
+| Job | Runner | Checks |
+|---|---|---|
+| Format and syntax | Ubuntu | `cargo fmt --all -- --check`, `node --check` on `ui/app.js` and `src-tauri/src/content.js`, JSON syntax of `tauri.conf.json` and `capabilities/` |
+| Clippy, tests and build (macOS) | macOS | `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked --all-features`, `cargo build --locked`, then fails if the build or `scripts/third_party_licenses.py` changed a tracked file or left a new one |
+
+Chatly only compiles on macOS, so everything that compiles Rust runs on the macOS runner. CI skips the `guard.rs` test, which needs a logged-in screen session, and doesn't run the end-to-end self-test, which needs a window and internet access. Run those yourself.
+
+The last step catches two common misses: a new command whose `permissions/autogenerated/` file wasn't committed, and a dependency change without a regenerated `THIRD_PARTY_LICENSES.md`.
+
+To run the same checks locally, install the tools once:
+
+```bash
+rustup component add rustfmt clippy
+```
+
+Then, in `src-tauri/`:
+
+```bash
+cargo fmt --all -- --check
+```
+
+```bash
+cargo clippy --locked --all-targets --all-features -- -D warnings
+```
+
+```bash
+cargo test --locked --all-features
+```
+
+CI uses the latest stable Rust. A new Rust release can add Clippy warnings to code that passed before. Fix those in their own `chore:` pull request.
+
+Third-party actions are pinned to a full commit SHA, because a tag can be moved to different code. The workflow has no comments, so the versions are listed here. Update this table when you change a pin:
+
+| Action | Version | Commit |
+|---|---|---|
+| `actions/checkout` | v7.0.1 | `3d3c42e5aac5ba805825da76410c181273ba90b1` |
+| `Swatinem/rust-cache` | v2.9.3 | `2201cc584a476d1b508be977bbe4b7d1c7a52e9c` |
+
+To find the commit for a release, use `git ls-remote --tags https://github.com/<owner>/<action>.git`.
+
+## Branches, commits and pull requests
+
+`main` is the stable development branch: everything on it has passed CI and review.
+
+1. **Don't push to `main` directly.** Start every change on a branch from an up-to-date `main`:
+
+   | Branch | For |
+   |---|---|
+   | `feature/<name>` | New features |
+   | `fix/<name>` | Bug fixes |
+   | `docs/<name>` | Documentation only |
+   | `refactor/<name>` | Code changes that don't change behavior |
+   | `security/<name>` | Hardening. For an unfixed vulnerability, report it privately first ([SECURITY.md](SECURITY.md)) rather than pushing a public branch. |
+
+2. **Write commit messages as `<type>: <what changed>`**, in lower case and the imperative:
+
+   | Type | Example |
+   |---|---|
+   | `feat` | `feat: add a setting to pause videos on switch` |
+   | `fix` | `fix: keep focus on the lock screen after Touch ID is cancelled` |
+   | `docs` | `docs: explain the cookie domain quirk` |
+   | `refactor` | `refactor: split layout() into smaller functions` |
+   | `test` | `test: cover lookalike domains in the allowlist` |
+   | `security` | `security: refuse blob URLs from other origins` |
+   | `chore` | `chore: update dependencies` |
+
+3. **Open a pull request against `main`** and fill in the template, including the **Verify** step of the recipe you followed.
+4. **CI must pass** before merging.
+5. **Resolve every review conversation** before merging.
+6. **Small contributions are squash-merged.** The pull request title becomes the commit on `main`, so write it in the same `<type>: …` form.
+
+### Repository settings for maintainers
+
+These rules are enforced in GitHub's settings, not by anything in this repository. Under **Settings → Rules → Rulesets**, add a branch ruleset for `main` with:
+
+- **Restrict deletions** and **Block force pushes**.
+- **Require a pull request before merging**, with **Require conversation resolution before merging**. Set required approvals to 1 once there are two maintainers. With a single maintainer, leave it at 0, since GitHub doesn't let you approve your own pull request.
+- **Require status checks to pass**, with **Require branches to be up to date before merging**, and the checks `Format and syntax` and `Clippy, tests and build (macOS)`. They appear in the list after CI has run once.
+- No bypass list, so the rules apply to administrators too.
+
+Under **Settings → General → Pull Requests**, allow squash merging, and turn on **Automatically delete head branches**.
+
 ## Release builds
 
 ```bash
 ../scripts/build-release.sh
 ```
 
-This builds `src-tauri/target/release/bundle/macos/Chatly.app`. The script remaps your home folder to `~` in the binary's embedded file paths, then fails if your home path is still in the binary. Never publish a binary built with a plain `cargo build` or `cargo tauri build`: those contain `/Users/<your-username>/…` hundreds of times.
+This builds `src-tauri/target/release/bundle/macos/Chatly.app` for the Mac it runs on. The script remaps your home folder to `~` in the binary's embedded file paths. It then checks the binary in every `Chatly.app` under `target/`, and fails if your home path is still in one of them. Delete old builds (`cargo clean`) if one from a plain build makes it fail. Never publish a binary built with a plain `cargo build` or `cargo tauri build`: those contain `/Users/<your-username>/…` hundreds of times.
+
+Extra arguments go to `cargo tauri build`. To build one app for both Apple silicon and Intel, install both targets once:
+
+```bash
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+```
+
+```bash
+../scripts/build-release.sh --target universal-apple-darwin
+```
+
+The app is then in `src-tauri/target/universal-apple-darwin/release/bundle/macos/`.
 
 To release a new version, change it in **both** `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`.
 
-Builds are ad-hoc signed (`signingIdentity: "-"`) with the hardened runtime. To sign with a Developer ID and notarize, set `signingIdentity` to your identity and follow [Tauri's macOS signing guide](https://v2.tauri.app/distribute/sign/macos/).
+Builds are ad-hoc signed (`signingIdentity: "-"`) with the hardened runtime. **Developer ID signing and notarization aren't set up.** To set them up, set `signingIdentity` to your identity and follow [Tauri's macOS signing guide](https://v2.tauri.app/distribute/sign/macos/).
+
+### Release checklist
+
+Chatly has no published releases yet. Until Developer ID signing and notarization are set up, publish **source releases only**: a tag and release notes, with no app attached. An ad-hoc signed app is blocked by Gatekeeper on other Macs, and nobody can tell a genuine build from a modified one. Steps 7 to 10 only apply once signing is set up.
+
+1. **Pick the version** using [Semantic Versioning](https://semver.org/). While Chatly is below 1.0, bump the minor version for new features or vault format changes, and the patch version for fixes.
+2. **Bump it** in `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`. Run `cargo build` so `Cargo.lock` picks up the new version, and commit all three files.
+3. **Update `CHANGELOG.md`.** Rename "Unreleased" to `[<version>] - <YYYY-MM-DD>` and start a new empty "Unreleased" section above it.
+4. **Run the tests** on a Mac, in `src-tauri/`: the [CI commands](#continuous-integration) including the `guard.rs` test, the [self-test](#end-to-end-self-test) with your vault moved aside, and the [manual checks](#manual-checks).
+5. **Check dependencies**: `cargo audit`, then `python3 ../scripts/third_party_licenses.py` and review the diff ([Updating dependencies](#updating-dependencies)).
+6. **Merge the release pull request** (`chore: release <version>`) once CI passes.
+7. **Build** from the merged `main` with `../scripts/build-release.sh --target universal-apple-darwin`, with `signingIdentity` set to your Developer ID. Open the built app on Apple silicon and on Intel: set a password, sign in, lock, unlock, quit and reopen.
+8. **Notarize and staple** the app as described in Tauri's guide. Then check it:
+
+   ```bash
+   codesign --verify --deep --strict --verbose=2 Chatly.app
+   ```
+
+   ```bash
+   xcrun stapler validate Chatly.app
+   ```
+
+   ```bash
+   spctl --assess --type execute --verbose Chatly.app
+   ```
+
+9. **Package it** without losing the signature:
+
+   ```bash
+   ditto -c -k --keepParent Chatly.app Chatly-<version>-macos-universal.zip
+   ```
+
+10. **Write SHA-256 checksums**:
+
+    ```bash
+    shasum -a 256 Chatly-<version>-macos-universal.zip > SHA256SUMS.txt
+    ```
+
+11. **Tag the release** on the merged commit and push the tag:
+
+    ```bash
+    git tag -a v<version> -m "Chatly <version>"
+    ```
+
+    ```bash
+    git push origin v<version>
+    ```
+
+12. **Publish the GitHub Release** from the tag (**Releases → Draft a new release**). Use the version's `CHANGELOG.md` section as the notes. If you built an app, attach the zip, `SHA256SUMS.txt`, `LICENSE` and `THIRD_PARTY_LICENSES.md`.
 
 ## Updating dependencies
 
@@ -583,14 +741,19 @@ Keep `Cargo.lock` committed. Chatly is an application, and the lock file pins ex
 
 ## Code style
 
-- The code has no comments. When something is non-obvious, put the reasoning in this guide (usually under [Rules you must keep](#rules-you-must-keep)) or in your pull request description.
-- Match the existing Rust style: 4-space indent, lines up to about 120 characters, early returns with `let … else`, small functions named for what they do.
+- The code has no comments, and neither do configuration files (TOML, YAML, JSON, shell, Python). When something is non-obvious, put the reasoning in this guide (usually under [Rules you must keep](#rules-you-must-keep)) or in your pull request description. Only the generated files in `permissions/autogenerated/` keep the header Tauri writes.
+- Format Rust with `cargo fmt`. The rules (120-character lines) are in `src-tauri/rustfmt.toml`, and CI rejects unformatted code.
+- Match the existing Rust style beyond what rustfmt does: early returns with `let … else`, small functions named for what they do.
+- `cargo clippy --all-targets --all-features -- -D warnings` must pass. CI fails on any warning.
 - User-facing text (errors, labels, dialogs) is short, plain and in sentence case: "Touch ID is turned off." not "Error: TouchID disabled!".
-- If you have clippy (`rustup component add clippy`), run `cargo clippy --all-targets` and don't add new warnings.
 
 ## Pull request checklist
 
-- [ ] `cargo test` passes.
+The [pull request template](.github/PULL_REQUEST_TEMPLATE.md) repeats this list.
+
+- [ ] Unit tests added or updated for every change in behavior.
+- [ ] `cargo fmt --all -- --check`, `cargo clippy` with `-D warnings`, and `cargo test` pass.
+- [ ] No comments added to code or configuration files.
 - [ ] The self-test passes, if you touched webviews, locking, cookies or the vault.
 - [ ] Manual checks done for what you touched.
 - [ ] No new command without all three of: `generate_handler!`, `build.rs`, `shell.json`.
@@ -600,3 +763,4 @@ Keep `Cargo.lock` committed. Chatly is an application, and the lock file pins ex
 - [ ] `permissions/autogenerated/` changes committed, if any.
 - [ ] `THIRD_PARTY_LICENSES.md` regenerated, if dependencies changed.
 - [ ] README updated for anything a user can see: settings, shortcuts, behavior.
+- [ ] `CHANGELOG.md` updated under "Unreleased", if users will notice the change.

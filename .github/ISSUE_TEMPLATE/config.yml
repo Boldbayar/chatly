@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Boldbayar/chatly/security/advisories/new
+    about: Please report security problems privately, not as a public issue. See SECURITY.md.
+  - name: Questions and ideas
+    url: https://github.com/Boldbayar/chatly/discussions
+    about: Ask how something works or discuss an idea before opening an issue.
+  - name: Contributing guide
+    url: https://github.com/Boldbayar/chatly/blob/main/CONTRIBUTING.md
+    about: How the code is organized, the rules that keep it secure, and how to send a pull request.
