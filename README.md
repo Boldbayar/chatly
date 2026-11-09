@@ -1,8 +1,8 @@
 # Chatly
 
-Instagram and Facebook in a separate macOS app that only you can unlock. Built with Rust and Tauri 2.
+Instagram, Facebook and Telegram in a separate macOS app that only you can unlock. Built with Rust and Tauri 2.
 
-> Chatly is an independent open-source project. It is not affiliated with, endorsed by, or sponsored by Meta Platforms, Inc. Instagram and Facebook are trademarks of Meta Platforms, Inc. Chatly loads the regular instagram.com and facebook.com websites. Using them through Chatly is still subject to Meta's terms.
+> Chatly is an independent open-source project. It is not affiliated with, endorsed by, or sponsored by Meta Platforms, Inc. or Telegram. Instagram and Facebook are trademarks of Meta Platforms, Inc. Telegram is a trademark of its owner. Chatly loads the regular instagram.com, facebook.com and web.telegram.org websites. Using them through Chatly is still subject to each site's terms.
 
 - [Why not just use a browser?](#why-not-just-use-a-browser)
 - [Install](#install)
@@ -22,9 +22,9 @@ On a work laptop, the browser is the worst place for personal chats:
 - **The profile is often managed.** Work browsers sync history and cookies, and run extensions that IT installs (DLP, monitoring) with full access to the pages you open.
 - **Sessions sit on disk in the clear.** Browser cookies can be copied off the machine.
 
-Chatly runs each site in its own embedded WebKit view with a **private, in-memory store**: no extensions, no sync, and no cookies shared with your browser or between the two sites. The only file it writes is an encrypted vault.
+Chatly runs each site in its own embedded WebKit view with a **private, in-memory store**: no extensions, no sync, and no cookies shared with your browser or between sites. The only file it writes is an encrypted vault.
 
-Links *from* chats to other sites open in your default browser (Chatly asks first), because Chatly blocks every non-Meta page from loading inside it.
+Links *from* chats to other sites open in your default browser (Chatly asks first), because Chatly only lets each site's own pages load inside it (Meta's for Instagram and Facebook).
 
 ## Install
 
@@ -101,8 +101,9 @@ If you can't unlock Chatly anymore, use **Forgot your password?** on the lock sc
 2. Type it again and choose **Create password**. It takes a moment.
 3. Instagram opens. Sign in as usual. Meta may ask you to confirm the login by email, SMS or a captcha. These all work inside Chatly.
 4. Switch to Facebook with the second icon in the left rail (or ⌘2) and sign in there too if you use it.
+5. Switch to Telegram with the third icon (or ⌘3) if you use it. On your phone, open Telegram, go to **Settings → Devices → Link Desktop Device** and scan the QR code. Or choose to log in with your phone number instead.
 
-**There is no password recovery.** If you forget it, you can only erase Chatly and sign in to Instagram and Facebook again. Your accounts and messages are not affected.
+**There is no password recovery.** If you forget it, you can only erase Chatly and sign in to each site again. Your accounts and messages are not affected.
 
 ### Unlocking
 
@@ -118,19 +119,20 @@ When unlocked, the narrow column on the left is the **rail**:
 |---|---|
 | Instagram icon | Shows Instagram. A badge shows the unread count from the page title. |
 | Facebook icon | Shows Facebook. |
+| Paper plane icon | Shows Telegram ([Telegram Web A](https://web.telegram.org/a/)). It has no unread badge: Telegram puts the open chat's name in its page title, not a count. |
 | Sliders icon | Opens Settings over the chats. |
 | Lock icon | Locks Chatly now. |
 
-Each site loads the first time you open it, then stays loaded (hidden) while you use the other one.
+Each site loads the first time you open it, then stays loaded (hidden) while you use the others.
 
 ### Keyboard shortcuts
 
 | Shortcut | Action |
 |---|---|
 | ⌘L | Lock now |
-| ⌘1 / ⌘2 | Instagram / Facebook |
-| ⇧⌘M | Messages (Instagram Direct or Facebook Messages) |
-| ⇧⌘H | Home feed |
+| ⌘1 / ⌘2 / ⌘3 | Instagram / Facebook / Telegram |
+| ⇧⌘M | Messages (Instagram Direct, Facebook Messages, or Telegram's chat list) |
+| ⇧⌘H | Home feed (Telegram's chat list) |
 | ⌘[ / ⌘] | Back / Forward |
 | ⌘R | Reload |
 | ⌘, | Settings |
@@ -141,7 +143,7 @@ Each site loads the first time you open it, then stays loaded (hidden) while you
 
 ### Opening links
 
-Clicking a link to another website shows **Open this link in your browser?** with the full address. Choose **Open in Browser** or **Cancel**. Chatly removes Meta's redirect and the `fbclid`, `igsh` and `igshid` tracking parameters first. Only `http` and `https` links are ever opened.
+Clicking a link to another website shows **Open this link in your browser?** with the full address. Choose **Open in Browser** or **Cancel**. Chatly removes Meta's redirect and the `fbclid`, `igsh` and `igshid` tracking parameters first. Only `http` and `https` links are ever opened. In Telegram, `t.me` links open inside Telegram itself.
 
 ### Settings
 
@@ -158,10 +160,10 @@ Open with the sliders icon or ⌘,. Every change is saved immediately.
 | | Erase after 10 wrong passwords | Off | After 10 wrong passwords in a row, Chatly erases its vault. This stops guessing for good, but anyone at your Mac can trigger it and sign you out. |
 | Privacy | Hide from screen sharing and screenshots | On | Most meeting apps and screenshot tools show an empty window. |
 | | Ask before opening links | On | Shows the confirmation described above. Off: links open in your browser immediately. |
-| | Stay signed in | On | Saves your Instagram and Facebook sessions, encrypted, so you stay signed in after quitting. Off: the saved sessions are deleted and you sign in each time Chatly starts. |
-| Accounts | Sign out (Instagram / Facebook) | | Click twice to confirm. Clears that site's cookies in Chatly and in the vault. |
+| | Stay signed in | On | Saves your sessions, encrypted, so you stay signed in after quitting: the sites' cookies, and the sign-in data Telegram keeps in its local storage. Off: the saved sessions are deleted and you sign in each time Chatly starts. |
+| Accounts | Sign out (Instagram / Facebook / Telegram) | | Click twice to confirm. Clears that site's cookies and saved data in Chatly and in the vault. This doesn't end the session on the site's side. See [Limits](#limits) for Telegram. |
 | Work laptop check | Run check | | See [Work laptop check](#work-laptop-check). |
-| Erase | Erase everything | | Type `ERASE` to confirm. Signs out of both sites, deletes the vault and the Touch ID key, and removes your password. Chatly returns to first launch. |
+| Erase | Erase everything | | Type `ERASE` to confirm. Signs out of every site, deletes the vault and the Touch ID key, and removes your password. Chatly returns to first launch. |
 
 ### Work laptop check
 
@@ -171,7 +173,7 @@ Open with the sliders icon or ⌘,. Every change is saved immediately.
 |---|---|
 | Device management | The Mac is enrolled in MDM. Its admins can install software and certificates. |
 | Proxy | A system HTTPS proxy, auto-config script or auto-discovery is set. |
-| Connection to instagram.com / facebook.com | The certificate isn't from a public certificate authority, which means the network is decrypting HTTPS. Chatly checks against Mozilla's public list of roots instead of the Mac's trust store, so a company root installed by IT is caught. |
+| Connection to instagram.com / facebook.com / web.telegram.org | The certificate isn't from a public certificate authority, which means the network is decrypting HTTPS. Chatly checks against Mozilla's public list of roots instead of the Mac's trust store, so a company root installed by IT is caught. |
 
 If anything is flagged, use your phone for anything private.
 
@@ -179,30 +181,30 @@ If anything is flagged, use your phone for anything private.
 
 1. On the lock screen, choose **Forgot your password?**.
 2. Type `ERASE` and choose **Erase and start over**.
-3. Set a new password and sign in to Instagram and Facebook again.
+3. Set a new password and sign in to each site again.
 
 ### Where your data is
 
 | What | Where |
 |---|---|
-| Encrypted vault (sessions, settings) | `~/Library/Application Support/com.chatly.desktop/vault.json`, readable only by your user (mode 600) |
+| Encrypted vault (cookies, Telegram's sign-in data, settings) | `~/Library/Application Support/com.chatly.desktop/vault.json`, readable only by your user (mode 600) |
 | Touch ID copy of the vault key (only if Touch ID is on) | Login keychain, item "Chatly" / "touch-id-unlock-key" |
 | A vault that couldn't be read | Set aside as `vault.damaged-<time>.json` in the same folder. Chatly then starts fresh. |
 | Files you download from chats | Your Downloads folder, **not encrypted** |
 
-Nothing else is written to disk. Browsing data (cache, local storage, IndexedDB) lives in memory and is gone when Chatly quits.
+Nothing else is written to disk. Browsing data (cache, local storage, IndexedDB) lives in memory and is gone when Chatly quits. The one exception is Telegram's small local storage items, which hold its sign-in: Chatly copies them into the encrypted vault, never to a file of their own.
 
 ## How the lock works
 
 | | |
 |---|---|
 | **Password** | Argon2id (64 MiB, 3 passes) turns it into a key that unwraps a random 256-bit vault key. |
-| **Vault** | Your Instagram and Facebook cookies, encrypted with XChaCha20-Poly1305. Saved when you lock, when you quit, and every 10 minutes. |
+| **Vault** | Your Instagram and Facebook cookies, and Telegram's cookies and small local storage items (where Telegram keeps its sign-in), encrypted with XChaCha20-Poly1305. Saved when you lock, when you quit, and every 10 minutes. |
 | **Locking** | Chats are hidden and their media paused, the lock screen fills the window, keyboard focus moves to it, and the vault key is dropped from memory. |
 | **Auto-lock** | See [Settings](#settings). Pointer movement doesn't count as activity, so a mouse jiggler can't keep Chatly open. |
 | **Touch ID** | Biometrics only. The vault key is stored in your login keychain together with a fingerprint of your enrolled fingers. If those change, the stored key is rejected. |
 | **Screen sharing** | The window is excluded from screen capture. |
-| **Isolation** | Only Chatly's own UI can call into Rust. No permission covers the Instagram or Facebook views, so every call from them is refused (the self-test checks this from instagram.com). Camera and microphone are blocked. |
+| **Isolation** | Only Chatly's own UI can call into Rust. No permission covers the site views, so every call from them is refused (the self-test checks this from instagram.com). Instagram and Facebook load only Meta's domains, and Telegram only web.telegram.org, so the Telegram view can't load Instagram in place, or the other way round. Camera and microphone are blocked. |
 
 ## What it can't protect against
 
@@ -219,7 +221,11 @@ See [SECURITY.md](SECURITY.md) for the full list and how to report a vulnerabili
 
 - Voice and video calls are off. Camera and microphone are blocked.
 - No notifications. Unread badges show in the rail only while unlocked.
-- Facebook may ask for your Messenger PIN once per launch to restore end-to-end encrypted chat history. That history lives in browser storage, which Chatly deliberately doesn't keep.
+- Facebook may ask for your Messenger PIN once per launch to restore end-to-end encrypted chat history. That history lives in browser storage, which Chatly deliberately doesn't keep for Facebook.
+- Telegram shows no unread badge in the rail.
+- Telegram Mini Apps, games and payment forms load third-party sites, so they don't open inside Chatly. Recording voice and video messages doesn't work, because the microphone and camera are blocked.
+- **Sign out** in Chatly's Settings forgets the session on this Mac only. Telegram keeps listing it under **Settings → Devices** on your phone until you end it there. To end it from Chatly, log out inside Telegram first, then sign out in Settings.
+- Chatly opens Telegram Web A. If you switch to Telegram's other web version inside Telegram, ⇧⌘H and ⇧⌘M still go back to Web A.
 - Builds are ad-hoc signed, not notarized. A build runs on the Mac that built it. On other Macs, Gatekeeper blocks it.
 - macOS only.
 
@@ -244,7 +250,7 @@ SDKROOT = "/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk"
 
 **Touch ID turned itself off.** Your fingerprints changed in System Settings, or the keychain item was removed. Unlock with your password and turn Touch ID on again.
 
-**Instagram or Facebook keeps signing me out.** Check that **Settings → Privacy → Stay signed in** is on. Quit Chatly with ⌘Q rather than force-quitting, so it can save your sessions.
+**A site keeps signing me out.** Check that **Settings → Privacy → Stay signed in** is on. Quit Chatly with ⌘Q rather than force-quitting, so it can save your sessions.
 
 **A link doesn't open.** Only `http` and `https` links leave Chatly. Other link types (such as `mailto:` or app links) are ignored on purpose.
 

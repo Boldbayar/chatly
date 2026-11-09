@@ -32,6 +32,10 @@
         <circle cx="12" cy="12" r="8.6"/>
         <path d="M15.2 8.3h-1.4a2.4 2.4 0 0 0-2.4 2.4v9.9M9.4 13.4h5"/>
       </symbol>
+      <symbol id="i-telegram" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20.6 3.4 3.7 10.1a.7.7 0 0 0 0 1.3l6.6 2.3 2.3 6.6a.7.7 0 0 0 1.3 0z"/>
+        <path d="m10.3 13.7 5.1-5.1"/>
+      </symbol>
       <symbol id="i-sliders" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
         <path d="M4 7.5h9.5M18.5 7.5H20M4 16.5h3.5M12.5 16.5H20"/>
         <circle cx="16" cy="7.5" r="2.3"/>
@@ -55,7 +59,7 @@
     <div class="gate-card">
       <div class="mark"><svg><use href="#i-mark"/></svg></div>
       <h1>Set a password for Chatly</h1>
-      <p class="lede">It encrypts your Instagram and Facebook sessions on this Mac. Nobody can open your chats without it, and it can't be recovered if you forget it.</p>
+      <p class="lede">It encrypts your Instagram, Facebook and Telegram sessions on this Mac. Nobody can open your chats without it, and it can't be recovered if you forget it.</p>
       <form id="setup-form" autocomplete="off" novalidate>
         <label class="field">
           <span>Password</span>
@@ -92,7 +96,7 @@
       <div class="forgot">
         <button class="link" type="button" id="forgot-btn" aria-expanded="false" aria-controls="forgot-panel">Forgot your password?</button>
         <div id="forgot-panel" class="confirm-box" hidden>
-          <p>It can't be recovered. You can erase Chatly and start over: your saved sessions on this Mac are deleted and you sign in to Instagram and Facebook again. Your accounts and messages aren't affected.</p>
+          <p>It can't be recovered. You can erase Chatly and start over: your saved sessions on this Mac are deleted and you sign in to each site again. Your accounts and messages aren't affected.</p>
           <label class="field">
             <span>Type ERASE to confirm</span>
             <input id="forgot-confirm" autocomplete="off" spellcheck="false" autocapitalize="characters">
@@ -110,6 +114,9 @@
     </button>
     <button class="svc" type="button" data-service="facebook" data-name="Facebook" title="Facebook (⌘2)" aria-label="Facebook">
       <svg><use href="#i-facebook"/></svg><span class="badge" hidden></span>
+    </button>
+    <button class="svc" type="button" data-service="telegram" data-name="Telegram" title="Telegram (⌘3)" aria-label="Telegram">
+      <svg><use href="#i-telegram"/></svg><span class="badge" hidden></span>
     </button>
     <div class="rail-fill" data-tauri-drag-region></div>
     <button class="tool" type="button" id="settings-btn" title="Settings (⌘,)" aria-label="Settings">
@@ -238,6 +245,10 @@
             <div class="row-text account"><svg><use href="#i-facebook"/></svg><label>Facebook</label></div>
             <button class="secondary small" type="button" data-signout="facebook">Sign out</button>
           </div>
+          <div class="row">
+            <div class="row-text account"><svg><use href="#i-telegram"/></svg><label>Telegram</label></div>
+            <button class="secondary small" type="button" data-signout="telegram">Sign out</button>
+          </div>
         </div>
       </section>
 
@@ -261,7 +272,7 @@
           <div class="row">
             <div class="row-text">
               <label>Erase everything</label>
-              <p>Signs out of both accounts, deletes the encrypted vault and the Touch ID key, and removes your password.</p>
+              <p>Signs out of every site, deletes the encrypted vault and the Touch ID key, and removes your password.</p>
             </div>
             <button class="secondary small danger-text" type="button" id="erase-toggle" aria-expanded="false" aria-controls="erase-panel">Erase…</button>
           </div>
@@ -274,7 +285,7 @@
         </div>
       </section>
 
-      <p class="footnote">Sessions are encrypted with XChaCha20-Poly1305 under a key derived from your password with Argon2id. Instagram and Facebook run in separate in-memory browser stores and can't reach Chatly itself.</p>
+      <p class="footnote">Sessions are encrypted with XChaCha20-Poly1305 under a key derived from your password with Argon2id. Each site runs in its own in-memory browser store and can't reach Chatly itself.</p>
     </div>
   </section>
 </body>

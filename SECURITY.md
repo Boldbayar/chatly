@@ -14,16 +14,16 @@ Reports are handled on a best-effort basis. Fixes go to the default branch. Ther
 
 ## What Chatly defends against
 
-Chatly is designed for one situation: **someone else at your Mac** (a coworker, family member, or IT staff at the desk) who must not read your Instagram and Facebook chats.
+Chatly is designed for one situation: **someone else at your Mac** (a coworker, family member, or IT staff at the desk) who must not read your Instagram, Facebook and Telegram chats.
 
 | Threat | Defense |
 |---|---|
 | Someone opens Chatly while you're away | Password or Touch ID lock. Auto-lock on idle, screen lock, sleep, minimize and hide, and optionally app switch. |
-| Someone copies your session cookies off the disk | Cookies are only stored encrypted (XChaCha20-Poly1305, key wrapped with Argon2id). Browsing data never touches the disk. |
+| Someone copies your sessions off the disk | Cookies, and the local storage items where Telegram keeps its sign-in, are only stored encrypted (XChaCha20-Poly1305, key wrapped with Argon2id). Other browsing data never touches the disk. |
 | Someone guesses the password at the lock screen | Exponential delay after 5 misses, up to 1 hour. Optional erase after 10. |
 | Your screen is shared or recorded | The window is excluded from capture. |
 | Your work browser's extensions and sync | Chatly uses its own WebKit views, with no extensions and no shared cookie store. |
-| A malicious page inside Instagram or Facebook | It can't call Chatly's Rust commands (no permission covers those webviews), can't load non-Meta pages in place, can't open non-web URL schemes, and can't use the camera or microphone. |
+| A malicious page inside one of the sites | It can't call Chatly's Rust commands (no permission covers those webviews), can't load pages outside its own site's domain list in place (Meta's domains for Instagram and Facebook, web.telegram.org for Telegram), can't reach the other sites' cookies or storage, can't open non-web URL schemes, and can't use the camera or microphone. |
 
 ## Known limitations
 
@@ -34,9 +34,11 @@ These are deliberate trade-offs or platform limits. Reports that only restate th
 3. **The wrong-password delay uses the system clock.** Changing the clock needs an administrator.
 4. **Downloads aren't encrypted.** Files you save from a chat go to `~/Downloads` like in any browser. Downloads are refused while Chatly is locked.
 5. **Erase works from the lock screen.** This is the forgot-password path. Anyone at your Mac can erase Chatly and sign you out, but they can't read anything.
-6. **Pages keep running while locked.** Locking hides the chats, pauses media and drops the vault key, but the pages, and their session cookies, stay in memory. Software that can read Chatly's memory (a debugger running as you, or root) can read them.
+6. **Pages keep running while locked.** Locking hides the chats, pauses media and drops the vault key, but the pages, their session cookies and their local storage stay in memory. Software that can read Chatly's memory (a debugger running as you, or root) can read them.
 7. **No protection from your employer's infrastructure.** HTTPS inspection, MDM-installed monitoring, EDR and keyloggers can all see your chats. The Work laptop check flags the common cases.
 8. **Ad-hoc signing.** Builds aren't notarized, and macOS can't tell a genuine build from a modified one. Build Chatly yourself from source you've read.
+9. **Telegram's saved sign-in is a whole device session.** The auth keys Chatly keeps for Telegram let whoever has them use your Telegram account, the same as a linked desktop app. They're protected like the cookies (encrypted in the vault, in memory while Chatly runs). **Sign out** in Chatly's Settings only deletes them from this Mac. The session stays valid on Telegram's side until you end it in Telegram under **Settings → Devices**, or log out inside Telegram first.
+10. **Saved site storage is whatever the page wrote.** Chatly copies a site's local storage as-is (capped at 32 KiB per item and 512 KiB in all) and gives it back to the same origin only. A page can't use this to reach Chatly or another site, but it can put any small data it likes in your vault.
 
 ## For people distributing builds
 

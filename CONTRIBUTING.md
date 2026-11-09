@@ -79,12 +79,13 @@ chatly/
 │   ├── icons/                   App icons. source.png is the 1024×1024 master.
 │   └── src/
 │       ├── main.rs              Window, webviews, state, locking, commands, menu, auto-lock
-│       ├── vault.rs             Argon2id + XChaCha20-Poly1305 vault, settings, stored cookies
-│       ├── services.rs          The sites, their URLs, the allowlist, link unwrapping
+│       ├── vault.rs             Argon2id + XChaCha20-Poly1305 vault, settings, stored cookies and site storage
+│       ├── services.rs          The sites, their URLs, each site's allowed domains, link unwrapping
+│       ├── storage.rs           Scripts that read and restore a site's local storage, and its size caps
 │       ├── biometric.rs         Touch ID and the keychain
 │       ├── guard.rs             Input and screen-lock signals for auto-lock
 │       ├── netcheck.rs          Work laptop check
-│       ├── content.js           Injected into Instagram/Facebook pages
+│       ├── content.js           Injected into every site page; its domain list comes from services.rs
 │       └── selftest.rs          End-to-end self-test (debug builds only)
 ├── scripts/
 │   ├── build-release.sh         Release build without your home path in the binary
@@ -103,7 +104,8 @@ chatly/
 ```
 ┌──────────────────────── window "main" ─────────────────────────┐
 │┌──────┐┌──────────────────────────────────────────────────────┐│
-││shell ││ svc-instagram  (or svc-facebook; one shown at a time)││
+││shell ││ svc-instagram  (or svc-facebook, svc-telegram; one   ││
+││      ││ shown at a time)                                     ││
 ││      ││                                                      ││
 ││ ui/  ││ https://www.instagram.com/                           ││
 ││      ││ private in-memory WebKit store, content.js injected  ││
@@ -117,7 +119,7 @@ chatly/
 ```
 
 - **`shell`** loads `ui/index.html`. It is the only webview granted any command, through `capabilities/shell.json`.
-- **`svc-instagram`** and **`svc-facebook`** are created the first time each site is opened (`ensure_webview`), with `.incognito(true)`: a private WebKit store in memory. Nothing they store reaches the disk. They also can't see each other's cookies.
+- **`svc-instagram`**, **`svc-facebook`** and **`svc-telegram`** are created the first time each site is opened (`ensure_webview`), with `.incognito(true)`: a private WebKit store in memory. Nothing they store reaches the disk, except what `save_sessions` encrypts into the vault. They also can't see each other's cookies or storage.
 - `layout()` decides what is visible. It always hides the site webviews **before** it grows the shell, so chats never show behind the lock screen.
 
 ### State
@@ -147,27 +149,36 @@ The UI never keeps state of its own. Rust sends it a `Status` (phase `"setup"`, 
 ```
 
 - **Unlock** (`finish_unlock`): stores the key, clears the failure counter, creates the active site's webview, lays out, focuses the site.
-- **Lock** (`lock_now`): sets `locked`, pauses media, hides the sites, moves focus to the shell (so typing lands on the lock screen, not in a hidden chat), then on a background thread saves cookies and drops the key. The key is dropped only if Chatly is still locked when the save finishes.
+- **Lock** (`lock_now`): sets `locked`, pauses media, hides the sites, moves focus to the shell (so typing lands on the lock screen, not in a hidden chat), then on a background thread saves cookies and site storage and drops the key. The key is dropped only if Chatly is still locked when the save finishes.
 - **Auto-lock** (`spawn_guard`): a thread that ticks every second while unlocked. Depending on settings, it locks on screen lock or sleep (a gap of more than 20 s between ticks means the Mac slept), and on minimize or hide. It always locks when idle longer than the setting, and saves cookies every 10 minutes. Lock-on-blur isn't here: it's the `WindowEvent::Focused(false)` case in `on_window_event`.
 
 ### Cookies and the vault
 
 ```
-password ──Argon2id──▶ KEK ──unwraps──▶ data key ──XChaCha20-Poly1305──▶ sessions
+password ──Argon2id──▶ KEK ──unwraps──▶ data key ──XChaCha20-Poly1305──▶ sessions, site storage
                                           │
                      (Touch ID on) ───────┴──▶ login keychain, with a hash of the enrolled fingers
 ```
 
-- `vault.json` holds: format version, KDF parameters and salt, the wrapped data key, a `key_check` (a known value encrypted with the data key, used to verify a key from the keychain), the encrypted sessions, and plain settings, lockout counter and last site.
-- Each encrypted field uses its own associated data (`chatly/v1/wrapped-key`, `chatly/v1/key-check`, `chatly/v1/sessions`), so one ciphertext can't be swapped in for another.
+- `vault.json` holds: format version, KDF parameters and salt, the wrapped data key, a `key_check` (a known value encrypted with the data key, used to verify a key from the keychain), the encrypted sessions (cookies), the encrypted site storage, and plain settings, lockout counter and last site.
+- Each encrypted field uses its own associated data (`chatly/v1/wrapped-key`, `chatly/v1/key-check`, `chatly/v1/sessions`, `chatly/v1/storage`), so one ciphertext can't be swapped in for another.
 - Saving (`save_sessions`) reads each open webview's cookies, converts them to `StoredCookie`, encrypts the whole map and writes the file atomically (temp file, mode 600, fsync, rename).
 - Restoring (`ensure_webview`) creates the webview on `about:blank`, sets the stored cookies, and only then navigates to the site, so the very first request already carries them.
 
+### Site storage
+
+Some sites keep their sign-in in `localStorage` instead of cookies. Telegram Web stores its auth keys there (`account1`, `user_auth`, `dc`, `dcN_auth_key`), so saving cookies alone would sign you out of Telegram on every launch. A site opts in with `Service::storage_origin()`. Instagram and Facebook return `None` and are unchanged.
+
+- **Saving.** For each open site with a storage origin, `save_sessions` calls `read_site_storage`. It runs `storage::read_script` with `Webview::eval_with_callback` and waits up to 3 s on a channel. The script returns `''` unless `location.origin` is the site's origin, skips items over 32 KiB, and always returns a string primitive (`''+JSON.stringify(…)` inside `try`). That matters: wry `unwrap()`s the conversion of the result, so a non-JSON value would crash Chatly. `storage::parse` decodes the result twice (a JSON string, then a string-to-string map) and enforces the caps again in Rust: 32 KiB per item and 512 KiB in all, kept in key order. If anything fails (timeout, wrong origin, bad JSON), the copy already in the vault is kept.
+- **Storing.** `vault.storage` is a separate sealed field (`Storage`: site id → key → value) with its own associated data. "Stay signed in" off, sign-out and erase clear it together with the cookies (`Vault::forget_sessions`, `sign_out`).
+- **Restoring.** `ensure_webview` reads the site's saved items and adds `storage::restore_script` as a main-frame `initialization_script`, so it runs before the page's own scripts on every load. It does nothing unless `location.origin` matches. On the first load it sets the `sessionStorage` marker `chatly-restored`, and writes the items only if `localStorage` is still empty. The marker stops it from writing a signed-out session back after the user logs out inside the site and the page reloads. The data is embedded as `JSON.parse("…")`, built with `serde_json`, never by string concatenation.
+
 ### Links
 
-- `content.js` catches clicks on links to non-Meta sites and turns them into `window.open`.
-- `on_new_window` → `open_popup`: Meta's redirect links (`l.instagram.com`, `l.facebook.com`, …) are unwrapped. Meta URLs load in place. Other `http(s)` URLs go to `open_in_browser`, which strips tracking parameters, asks (if `confirm_links` is on), and runs `/usr/bin/open`.
-- `on_navigation` → `services::allowed_in_app` blocks everything else from loading in a site webview, including in iframes.
+- Each site has two domain lists in `services.rs`. `domains()` may load inside its webview. `link_domains()` is a superset whose links the page handles itself. Instagram and Facebook both use `META_DOMAINS` for both. Telegram loads only `web.telegram.org`, but leaves `t.me`, `telegram.me` and `telegram.dog` links to Telegram Web, which opens them inside Telegram.
+- `content.js` catches clicks on links outside `link_domains()` and turns them into `window.open`. `Service::content_script()` fills its `__CHATLY_LINK_DOMAINS__` placeholder with the site's list, as JSON.
+- `on_new_window` → `open_popup`: Meta's redirect links (`l.instagram.com`, `l.facebook.com`, …) are unwrapped. URLs the site owns (`Service::owns`) load in place. Other `http(s)` URLs go to `open_in_browser`, which strips tracking parameters, asks (if `confirm_links` is on), and runs `/usr/bin/open`.
+- `on_navigation` → `services::allowed_in_app(svc, url)` blocks everything else from loading in that site's webview, including in iframes. A `blob:` URL must belong to the same site. Captcha frames are allowed for every site.
 
 ## Rules you must keep
 
@@ -178,7 +189,7 @@ Each rule exists because breaking it causes a real security or reliability bug.
 1. **Only the `shell` webview may call Rust.** Never add a site webview label, a remote URL or `"remote"` to any capability. Never set `withGlobalTauri` to `true`. The self-test checks that instagram.com can't call anything.
 2. **Every command is listed in three places**: `generate_handler!` in `main.rs`, `COMMANDS` in `build.rs`, and `allow-…` in `capabilities/shell.json`. Listing it in `build.rs` makes Tauri deny it unless a capability grants it. Never skip `build.rs`.
 3. **Never pass page-controlled text into `call_shell` or `eval`.** The shell is privileged. Build arguments with `serde_json::to_string` or use numbers and `&'static str`. `badge()` only ever receives a number parsed from the page title, never the title itself.
-4. **Keep the two domain lists identical**: `META_DOMAINS` in `services.rs` and the `META` regex in `content.js`.
+4. **Domains live only in `services.rs`.** `content.js` gets its list from `Service::content_script()`. Never hard-code a domain in `content.js`, and keep every `domains()` entry in `link_domains()` too (the `link_domains_cover_domains` test checks this).
 5. **`allowed_in_app` must stay silent.** It runs for every frame, not just clicks, so it can't tell a link the user clicked from an embedded iframe. Return `false`; never show a dialog from it.
 6. **Only `http` and `https` reach `/usr/bin/open`.** `open` would launch apps for other URL schemes. Keep the check in `launch_browser`.
 
@@ -186,7 +197,7 @@ Each rule exists because breaking it causes a real security or reliability bug.
 
 7. **Wrap passwords and keys in `Zeroizing`** as soon as they arrive (see `setup`, `unlock`, `change_password`).
 8. **Never log secrets.** No passwords, keys, cookie values or cookie names in `eprintln!`. Debug-only diagnostics go behind `#[cfg(debug_assertions)]`.
-9. **Nothing unencrypted goes to disk** except the settings, counters and last site already in `vault.json`. No caches, no logs, no WebKit persistent stores.
+9. **Nothing unencrypted goes to disk** except the settings, counters and last site already in `vault.json`. No caches, no logs, no WebKit persistent stores. Site storage goes only into the sealed `storage` field.
 
 **Concurrency**
 
@@ -204,6 +215,10 @@ Each rule exists because breaking it causes a real security or reliability bug.
 **Cookies**
 
 17. **Keep the cookie domain quirk.** `StoredCookie` stores the domain without a leading dot. `to_cookie()` writes it as `..instagram.com` because wry strips one leading dot before handing it to WebKit, and WebKit treats a dot-less domain as host-only. The `cookie_domain_keeps_its_dot` test guards this.
+
+**Site storage**
+
+18. **Treat site storage as page-controlled and secret.** Read it only with `read_site_storage`, from off the main thread (rule 11), and only through `storage::parse`, which caps its size. The read script must check the origin and always return a string. Never log storage keys or values (counts only, debug builds only), never pass them to `call_shell`, and restore them only with `storage::restore_script`.
 
 ## Recipes
 
@@ -374,12 +389,12 @@ Example: a checkbox `pause_on_switch`.
 
 ### Allow a new domain inside Chatly
 
-Only do this when a Meta page breaks because a domain it needs is blocked. With `cargo run`, blocked navigations print `chatly: blocked a frame navigation to …` in the terminal.
+Only do this when a site's page breaks because a domain it needs is blocked. With `cargo run`, blocked navigations print `chatly: blocked a frame navigation to …` in the terminal.
 
-1. Add the registrable domain (no `www.`, no scheme) to `META_DOMAINS` in `src-tauri/src/services.rs`. Subdomains are included automatically.
-2. Add the same domain to the `META` regex in `src-tauri/src/content.js` (rule 4). Escape dots: `newdomain\.com`.
-3. If it's only needed inside frames for login challenges, add it to `CAPTCHA_DOMAINS` instead, and skip step 2.
-4. Add tests in `services.rs`, under `meta_hosts` or `in_app_rules`: one URL that must pass, and lookalikes that must fail (`https://newdomain.com.evil.example/`, `https://notnewdomain.com/`).
+1. Add the registrable domain (no `www.`, no scheme) to that site's list in `src-tauri/src/services.rs`: `META_DOMAINS` for Instagram and Facebook, `TELEGRAM_DOMAINS` for Telegram. Subdomains are included automatically. Add it to the site's link list too (`TELEGRAM_LINK_DOMAINS`; the Meta sites use one list for both). `content.js` picks it up on its own (rule 4).
+2. If the site only needs it inside frames for login challenges, add it to `CAPTCHA_DOMAINS` instead. That list is allowed for every site.
+3. If the site only needs its links handled by the page (like Telegram's `t.me`), add it to the link list alone, not to the site's domains.
+4. Add tests in `services.rs`, under `meta_hosts`, `telegram_hosts` or `in_app_rules`: one URL that must pass, and lookalikes that must fail (`https://newdomain.com.evil.example/`, `https://notnewdomain.com/`). If the domain belongs to one site, check in `sites_stay_apart` that the other sites still refuse it.
 
 **Never allow** a domain where anyone can host pages (for example `*.github.io`, `*.googleusercontent.com`, `*.cloudfront.net`), and never allow plain `http`.
 
@@ -387,17 +402,19 @@ Only do this when a Meta page breaks because a domain it needs is blocked. With 
 
 ### Add a site
 
-Example: adding Threads. Do the steps in order. The compiler flags most places you miss, because every `match` on `Service` must cover the new variant.
+Example: adding Threads. Telegram was added this way, so its code is a complete example. Do the steps in order. The compiler flags most places you miss, because every `match` on `Service` must cover the new variant.
 
 1. **`src-tauri/src/services.rs`**
    - Add the variant: `Threads,` to `enum Service`. Its serialized id is the variant name in lowercase (`"threads"`).
-   - Add it to `ALL`, and change the array length: `pub const ALL: [Service; 3] = [Service::Instagram, Service::Facebook, Service::Threads];`
+   - Add it to `ALL`, and change the array length: `pub const ALL: [Service; 4] = [Service::Instagram, Service::Facebook, Service::Telegram, Service::Threads];`
    - `id()`: `Service::Threads => "threads",`. This must equal the lowercase variant name, because the UI, the menu ids and the saved sessions all use it.
    - `label()`: `Service::Threads => "svc-threads",`
    - `home()` and `messages()`: the site's URLs. If the site has no messages page, return its home.
-   - Add the site's domains to `META_DOMAINS` and to `content.js` ([previous recipe](#allow-a-new-domain-inside-chatly)). Open the site in a normal browser with the developer tools' Network tab to see which domains it loads pages and frames from.
+   - `domains()` and `link_domains()`: the domains the site may load inside Chatly, and the ones whose links its own page handles ([previous recipe](#allow-a-new-domain-inside-chatly)). Threads is Meta's, so it can return `META_DOMAINS` for both. A site from another company gets its own lists, like `TELEGRAM_DOMAINS`. Never add another company's domain to `META_DOMAINS`. Open the site in a normal browser with the developer tools' Network tab to see which domains it loads pages and frames from.
+   - `storage_origin()`: `None` if the site keeps its sign-in in cookies. If it keeps it in `localStorage` (check the Application tab of the developer tools after signing in, then delete the cookies and reload), return its origin, such as `Some("https://www.threads.net")`. See [Site storage](#site-storage).
+   - `unread_in_title()`: `true` only if the page title starts with the unread count, as in `(3) Instagram`.
    - If the site wraps outbound links in a redirect, add its host to `unwrap_link_shim`.
-2. **`src-tauri/src/main.rs`**, in `build_menu`, View submenu: `.item(&item("svc:threads", "Threads", "CmdOrCtrl+3")?)`. `on_menu` handles `svc:` ids already.
+2. **`src-tauri/src/main.rs`**, in `build_menu`, View submenu: `.item(&item("svc:threads", "Threads", "CmdOrCtrl+4")?)`. `on_menu` handles `svc:` ids already.
 3. **`ui/index.html`**
    - An icon in the `<defs>` sprite sheet. Draw your own simple 24×24 line icon: don't copy the site's logo, which is a trademark.
 
@@ -407,10 +424,10 @@ Example: adding Threads. Do the steps in order. The compiler flags most places y
      </symbol>
      ```
 
-   - A rail button after the Facebook one. `data-service` is the id:
+   - A rail button after the Telegram one. `data-service` is the id:
 
      ```html
-     <button class="svc" type="button" data-service="threads" data-name="Threads" title="Threads (⌘3)" aria-label="Threads">
+     <button class="svc" type="button" data-service="threads" data-name="Threads" title="Threads (⌘4)" aria-label="Threads">
        <svg><use href="#i-threads"/></svg><span class="badge" hidden></span>
      </button>
      ```
@@ -426,11 +443,11 @@ Example: adding Threads. Do the steps in order. The compiler flags most places y
 
    `app.js` wires up `.svc` and `[data-signout]` buttons on its own. Selecting, badges, sign-out and saved sessions all work from the id.
 4. **Optional**: add the site's host to the list in `netcheck::run` so the Work laptop check tests its certificate too.
-5. **Docs**: update the README (title line, rail table, shortcuts) and the disclaimer if the site belongs to another company.
+5. **Docs**: update the README (title line, rail table, shortcuts, limits) and the disclaimer if the site belongs to another company.
+
+A new variant is also a vault format change in one direction: Chatly versions from before the new site was added don't know the new id. Since this release, `Vault::load` reads an unknown `last_service` as Instagram (`known_service`). Older builds don't, and set the vault aside as damaged when its last site is one they don't know. Say so in the release notes.
 
 **Verify**: sign in to the new site, lock, unlock: still signed in. Quit and reopen: still signed in. Sign out from Settings: signed out, other sites unaffected. `cargo test` passes.
-
-> The allowlist and functions are named after Meta (`META_DOMAINS`, `is_meta`) because every current site is Meta's. To add a site from another company, rename them to something neutral in the same pull request rather than mixing a non-Meta domain into the Meta list.
 
 ### Add a Work laptop check
 
@@ -491,8 +508,9 @@ cargo test
 
 | Area | Tests |
 |---|---|
-| `vault.rs` | Password round trip and rejection, sessions encrypted and bound to the key, tampering detected, password change keeps data, lockout timing, cookie domain dot |
-| `services.rs` | Meta hosts and lookalikes, the in-app allowlist, link unwrapping, tracking removal |
+| `vault.rs` | Password round trip and rejection, sessions and site storage encrypted and bound to the key, the two can't be swapped, tampering detected, password change keeps data, older vaults and unknown last sites load, lockout timing, cookie domain dot |
+| `services.rs` | Meta and Telegram hosts and lookalikes, the in-app allowlist per site, sites can't load each other, link domains cover domains, each site's content script, link unwrapping, tracking removal |
+| `storage.rs` | Parsing what the read script returns, unusable results, per-item and total caps, origin checks, values with quotes, backslashes and `</script>` survive the restore script |
 | `main.rs` | Unread count parsing, duration text |
 | `guard.rs` | Screen-lock state is readable. **Fails if run while the screen is locked or over SSH.** |
 
@@ -504,7 +522,7 @@ Add a test for every rule you encode: a new domain, a new setting's clamping, a 
 CHATLY_SELFTEST=1 cargo run
 ```
 
-Debug builds only. It takes about 2½ minutes and needs internet access to instagram.com and facebook.com. It signs in to nothing. The window appears and minimizes by itself, so don't use the Mac while it runs. It checks setup, Instagram loading, blocked navigation, IPC refusal from instagram.com, lock and unlock, that the vault contains no readable cookies, session restore, store isolation between sites, minimize-to-lock, idle auto-lock and erase. Output lines start with `[selftest] PASS` or `FAIL`. The exit code is 0 only if everything passed.
+Debug builds only. It takes about 3 minutes and needs internet access to instagram.com, facebook.com and web.telegram.org. It signs in to nothing. The window appears and minimizes by itself, so don't use the Mac while it runs. It checks setup, Instagram loading, blocked navigation, IPC refusal from instagram.com, lock and unlock, that the vault contains no readable cookies, session restore, store isolation between sites, Telegram loading and staying on its own domain, Telegram's local storage saved encrypted and restored into a new webview, minimize-to-lock, idle auto-lock and erase. Output lines start with `[selftest] PASS` or `FAIL`. The exit code is 0 only if everything passed.
 
 It **refuses to run if a vault already exists** and erases what it created. On a Mac where you use Chatly, move your vault aside first ([Set up](#set-up)).
 
@@ -520,7 +538,8 @@ Before a pull request that touches locking, Touch ID, links or the window, run t
 - [ ] Touch ID on, lock, unlock with a fingerprint. Cancel the prompt: no error, and focus returns to the password field.
 - [ ] A screen recording (⇧⌘5) shows Chatly's window blank.
 - [ ] Clicking a link to another site asks first, then opens in the browser without tracking parameters.
-- [ ] Quit and reopen: still signed in to both sites.
+- [ ] Quit and reopen: still signed in to every site.
+- [ ] Sign in to Telegram by QR code. Lock and unlock, then quit and reopen: still signed in. Sign out of Telegram in Settings: only Telegram is signed out.
 
 ## Release builds
 
@@ -577,7 +596,7 @@ Keep `Cargo.lock` committed. Chatly is an application, and the lock file pins ex
 - [ ] No new command without all three of: `generate_handler!`, `build.rs`, `shell.json`.
 - [ ] No capability granted to anything but `shell`.
 - [ ] No secrets in logs, no new files written to disk.
-- [ ] `META_DOMAINS` and `content.js` still match.
+- [ ] No domain hard-coded in `content.js`, and no site's domain added to another company's list.
 - [ ] `permissions/autogenerated/` changes committed, if any.
 - [ ] `THIRD_PARTY_LICENSES.md` regenerated, if dependencies changed.
 - [ ] README updated for anything a user can see: settings, shortcuts, behavior.

@@ -52,12 +52,17 @@ pub fn run(app: AppHandle) {
         vault.save(&st.vault_path).expect("save vault");
         st.inner().vault = Some(vault);
         r.check(finish_unlock(&app, key).is_ok(), "setup unlocks and opens Instagram");
-        let mode = std::fs::metadata(&st.vault_path).map(|m| m.permissions().mode() & 0o777).unwrap_or(0);
+        let mode = std::fs::metadata(&st.vault_path)
+            .map(|m| m.permissions().mode() & 0o777)
+            .unwrap_or(0);
         r.check(mode == 0o600, &format!("vault file is owner-only (mode {mode:o})"));
 
         sleep(Duration::from_secs(12));
         let ig = Service::Instagram;
-        r.check(url_of(&app, ig).starts_with("https://www.instagram.com/"), &format!("Instagram loaded ({})", url_of(&app, ig)));
+        r.check(
+            url_of(&app, ig).starts_with("https://www.instagram.com/"),
+            &format!("Instagram loaded ({})", url_of(&app, ig)),
+        );
         let csrf = cookie_values(&app, ig, "csrftoken");
         let mid = cookie_values(&app, ig, "mid");
         eprintln!("[selftest] instagram cookies: csrftoken={} mid={}", csrf.len(), mid.len());
@@ -93,7 +98,10 @@ pub fn run(app: AppHandle) {
         let probe = TITLE.lock().map(|t| t.clone()).unwrap_or_default();
         eprintln!("[selftest] IPC probe from instagram.com: {probe}");
         r.check(!probe.is_empty(), "IPC probe ran");
-        r.check(!probe.contains("ALLOWED") && !probe.contains("fetch=200"), "every IPC call from instagram.com is refused");
+        r.check(
+            !probe.contains("ALLOWED") && !probe.contains("fetch=200"),
+            "every IPC call from instagram.com is refused",
+        );
         r.check(!st.inner().locked, "the page couldn't lock Chatly through IPC");
 
         lock_now(&app);
@@ -105,7 +113,10 @@ pub fn run(app: AppHandle) {
         r.check(!leaked, "no cookie names or values in the vault file");
 
         let vault = st.inner().vault.clone().expect("vault");
-        r.check(matches!(vault.unlock("not-the-password"), Err(vault::Error::WrongPassword)), "wrong password is refused");
+        r.check(
+            matches!(vault.unlock("not-the-password"), Err(vault::Error::WrongPassword)),
+            "wrong password is refused",
+        );
         let key = vault.unlock(PASSWORD).expect("unlock");
         r.check(finish_unlock(&app, key).is_ok(), "right password unlocks");
 
@@ -121,7 +132,11 @@ pub fn run(app: AppHandle) {
         sleep(Duration::from_secs(10));
         let csrf_after = cookie_values(&app, ig, "csrftoken");
         let mid_after = cookie_values(&app, ig, "mid");
-        eprintln!("[selftest] after restore: csrftoken {csrf_after:?} vs {csrf:?}; mid {} vs {}", mid_after.len(), mid.len());
+        eprintln!(
+            "[selftest] after restore: csrftoken {csrf_after:?} vs {csrf:?}; mid {} vs {}",
+            mid_after.len(),
+            mid.len()
+        );
         r.check(
             csrf_after.len() == 1 && csrf_after == csrf,
             "restored cookies were sent to www.instagram.com and kept (no new csrftoken issued)",
@@ -131,7 +146,10 @@ pub fn run(app: AppHandle) {
         let fb = Service::Facebook;
         r.check(select(&app, fb).is_ok(), "switch to Facebook");
         sleep(Duration::from_secs(10));
-        r.check(url_of(&app, fb).starts_with("https://www.facebook.com/"), &format!("Facebook loaded ({})", url_of(&app, fb)));
+        r.check(
+            url_of(&app, fb).starts_with("https://www.facebook.com/"),
+            &format!("Facebook loaded ({})", url_of(&app, fb)),
+        );
         let fb_has_ig = app
             .get_webview(fb.label())
             .and_then(|wv| wv.cookies().ok())
@@ -140,11 +158,73 @@ pub fn run(app: AppHandle) {
             .any(|c| c.domain().is_some_and(|d| d.contains("instagram")));
         r.check(!fb_has_ig, "Facebook's store has no Instagram cookies");
 
+        let tg = Service::Telegram;
+        let tg_origin = tg.storage_origin().unwrap_or_default();
+        r.check(select(&app, tg).is_ok(), "switch to Telegram");
+        sleep(Duration::from_secs(12));
+        r.check(
+            url_of(&app, tg).starts_with("https://web.telegram.org/"),
+            &format!("Telegram loaded ({})", url_of(&app, tg)),
+        );
+        if let Some(wv) = app.get_webview(tg.label()) {
+            let _ = wv.eval("location.href = 'https://www.instagram.com/'");
+        }
+        sleep(Duration::from_secs(3));
+        r.check(url_of(&app, tg).starts_with("https://web.telegram.org/"), "Telegram can't load another site in place");
+
+        let probe = format!("probe-{}", unix_now());
+        if let Some(wv) = app.get_webview(tg.label()) {
+            let value = serde_json::to_string(&probe).unwrap_or_default();
+            let _ = wv.eval(format!("localStorage.setItem('chatly-selftest', {value})"));
+        }
+        sleep(Duration::from_secs(1));
+        save_sessions(&app);
+        let key = st.key().clone().expect("unlocked");
+        let saved = st
+            .inner()
+            .vault
+            .as_ref()
+            .and_then(|v| v.read_storage(&key).ok())
+            .unwrap_or_default();
+        let saved_probe = saved.get(tg.id()).and_then(|items| items.get("chatly-selftest"));
+        r.check(saved_probe == Some(&probe), "Telegram's local storage saved to the vault");
+        let disk = std::fs::read_to_string(&st.vault_path).unwrap_or_default();
+        r.check(
+            !disk.contains(&probe) && !disk.contains("chatly-selftest"),
+            "no local storage keys or values in the vault file",
+        );
+
+        {
+            let _sessions = relock(&st.sessions);
+            if let Some(wv) = app.get_webview(tg.label()) {
+                let _ = wv.close();
+            }
+            st.inner().open.remove(&tg);
+        }
+        r.check(ensure_webview(&app, tg).is_ok(), "Telegram webview recreated from the vault");
+        layout(&app);
+        sleep(Duration::from_secs(10));
+        let restored = app
+            .get_webview(tg.label())
+            .and_then(|wv| read_site_storage(&wv, tg_origin))
+            .unwrap_or_default();
+        r.check(restored.get("chatly-selftest") == Some(&probe), "Telegram's local storage restored from the vault");
+        let tg_has_meta = app
+            .get_webview(tg.label())
+            .and_then(|wv| wv.cookies().ok())
+            .unwrap_or_default()
+            .iter()
+            .any(|c| c.domain().is_some_and(|d| d.contains("instagram") || d.contains("facebook")));
+        r.check(!tg_has_meta, "Telegram's store has no Instagram or Facebook cookies");
+
         if let Some(win) = app.get_window(MAIN) {
             let _ = win.minimize();
             sleep(Duration::from_secs(3));
             r.check(st.inner().locked, "minimizing locks Chatly");
-            r.check(app.get_webview(fb.label()).is_some_and(|wv| wv.cookies().is_ok()), "chats stay loaded (hidden) while locked");
+            r.check(
+                app.get_webview(fb.label()).is_some_and(|wv| wv.cookies().is_ok()),
+                "chats stay loaded (hidden) while locked",
+            );
             let _ = win.unminimize();
             sleep(Duration::from_secs(1));
         }
@@ -161,7 +241,10 @@ pub fn run(app: AppHandle) {
 
         erase_everything_now(&app);
         r.check(!st.vault_path.exists(), "erase deletes the vault");
-        r.check(app.get_webview(ig.label()).is_none() && app.get_webview(fb.label()).is_none(), "erase closes the service webviews");
+        r.check(
+            [ig, fb, tg].iter().all(|svc| app.get_webview(svc.label()).is_none()),
+            "erase closes the site webviews",
+        );
 
         eprintln!("[selftest] done: {} failure(s)", r.failures);
         st.exiting.store(true, SeqCst);

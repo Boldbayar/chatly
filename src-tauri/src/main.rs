@@ -9,6 +9,7 @@ mod netcheck;
 #[cfg(debug_assertions)]
 mod selftest;
 mod services;
+mod storage;
 mod vault;
 
 use std::{
@@ -25,13 +26,14 @@ use serde::Serialize;
 use tauri::{
     menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     webview::{DownloadEvent, NewWindowResponse},
-    AppHandle, LogicalPosition, LogicalSize, Manager, Rect, RunEvent, TitleBarStyle, Url, WebviewBuilder,
+    AppHandle, LogicalPosition, LogicalSize, Manager, Rect, RunEvent, TitleBarStyle, Url, Webview, WebviewBuilder,
     WebviewUrl, Window, WindowBuilder, WindowEvent, Wry,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use zeroize::Zeroizing;
 
 use services::Service;
+use storage::SiteStorage;
 use vault::{Key, Settings, StoredCookie, Vault};
 
 const MAIN: &str = "main";
@@ -43,9 +45,8 @@ const SAVE_EVERY: Duration = Duration::from_secs(10 * 60);
 const SLEEP_GAP: Duration = Duration::from_secs(20);
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
                           (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
-const CONTENT_SCRIPT: &str = include_str!("content.js");
-const PAUSE_MEDIA: &str =
-    "document.querySelectorAll('video,audio').forEach(function(m){try{m.pause()}catch(e){}})";
+const STORAGE_TIMEOUT: Duration = Duration::from_secs(3);
+const PAUSE_MEDIA: &str = "document.querySelectorAll('video,audio').forEach(function(m){try{m.pause()}catch(e){}})";
 
 type Res<T> = Result<T, String>;
 
@@ -158,10 +159,7 @@ fn push_state(app: &AppHandle) {
 }
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
-    Rect {
-        position: LogicalPosition::new(x, y).into(),
-        size: LogicalSize::new(w.max(0.0), h.max(0.0)).into(),
-    }
+    Rect { position: LogicalPosition::new(x, y).into(), size: LogicalSize::new(w.max(0.0), h.max(0.0)).into() }
 }
 
 fn layout(app: &AppHandle) {
@@ -201,17 +199,22 @@ fn unread_count(title: &str) -> u32 {
         .unwrap_or(0)
 }
 
-fn content_webview(app: &AppHandle, svc: Service) -> WebviewBuilder<Wry> {
+fn content_webview(app: &AppHandle, svc: Service, restore: Option<String>) -> WebviewBuilder<Wry> {
     let for_popups = app.clone();
     let for_badges = app.clone();
     let for_downloads = app.clone();
-    WebviewBuilder::new(svc.label(), WebviewUrl::External(Url::parse("about:blank").expect("static URL")))
-        .incognito(true)
-        .user_agent(USER_AGENT)
-        .initialization_script(CONTENT_SCRIPT)
+    let mut builder =
+        WebviewBuilder::new(svc.label(), WebviewUrl::External(Url::parse("about:blank").expect("static URL")))
+            .incognito(true)
+            .user_agent(USER_AGENT)
+            .initialization_script(svc.content_script());
+    if let Some(script) = restore {
+        builder = builder.initialization_script(script);
+    }
+    builder
         .disable_drag_drop_handler()
-        .on_navigation(|url| {
-            let allowed = services::allowed_in_app(url);
+        .on_navigation(move |url| {
+            let allowed = services::allowed_in_app(svc, url);
             #[cfg(debug_assertions)]
             if !allowed {
                 eprintln!("chatly: blocked a frame navigation to {url}");
@@ -227,7 +230,9 @@ fn content_webview(app: &AppHandle, svc: Service) -> WebviewBuilder<Wry> {
             if let Some(probe) = title.strip_prefix("E2E:") {
                 *relock(&selftest::TITLE) = probe.to_string();
             }
-            call_shell(&for_badges, &format!("badge({:?},{})", svc.id(), unread_count(&title)));
+            if svc.unread_in_title() {
+                call_shell(&for_badges, &format!("badge({:?},{})", svc.id(), unread_count(&title)));
+            }
         })
         .on_download(move |_, event| match event {
             DownloadEvent::Requested { .. } => !state(&for_downloads).inner().locked,
@@ -242,20 +247,35 @@ fn ensure_webview(app: &AppHandle, svc: Service) -> Res<()> {
         return Ok(());
     }
     let key = st.key().clone();
-    let cookies = {
+    let (cookies, saved) = {
         let i = st.inner();
         match (key, &i.vault) {
-            (Some(key), Some(v)) => v
-                .read_sessions(&key)
-                .ok()
-                .and_then(|mut s| s.remove(svc.id()))
-                .unwrap_or_default(),
-            _ => Vec::new(),
+            (Some(key), Some(v)) => (
+                v.read_sessions(&key)
+                    .ok()
+                    .and_then(|mut s| s.remove(svc.id()))
+                    .unwrap_or_default(),
+                v.read_storage(&key)
+                    .ok()
+                    .and_then(|mut s| s.remove(svc.id()))
+                    .unwrap_or_default(),
+            ),
+            _ => (Vec::new(), SiteStorage::new()),
         }
     };
+    let restore = svc
+        .storage_origin()
+        .filter(|_| !saved.is_empty())
+        .map(|origin| storage::restore_script(origin, &saved));
+    #[cfg(debug_assertions)]
+    if svc.storage_origin().is_some() {
+        eprintln!("chatly: {}: restoring {} storage items", svc.id(), saved.len());
+    }
+    drop(saved);
     let win = app.get_window(MAIN).ok_or("Chatly's window is gone.")?;
+    let child = content_webview(app, svc, restore);
     let wv = win
-        .add_child(content_webview(app, svc), LogicalPosition::new(RAIL_WIDTH, 0.0), LogicalSize::new(1.0, 1.0))
+        .add_child(child, LogicalPosition::new(RAIL_WIDTH, 0.0), LogicalSize::new(1.0, 1.0))
         .map_err(|e| e.to_string())?;
     let _ = wv.hide();
     let now = unix_now() as i64;
@@ -272,6 +292,16 @@ fn ensure_webview(app: &AppHandle, svc: Service) -> Res<()> {
     Ok(())
 }
 
+fn read_site_storage(wv: &Webview<Wry>, origin: &str) -> Option<SiteStorage> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    wv.eval_with_callback(storage::read_script(origin), move |result| {
+        let _ = tx.send(result);
+    })
+    .ok()?;
+    let result = Zeroizing::new(rx.recv_timeout(STORAGE_TIMEOUT).ok()?);
+    storage::parse(&result)
+}
+
 fn save_sessions(app: &AppHandle) {
     let st = state(app);
     let _sessions = relock(&st.sessions);
@@ -282,6 +312,7 @@ fn save_sessions(app: &AppHandle) {
         (i.open.clone(), v.settings.remember_sessions)
     };
     let mut fresh = Vec::new();
+    let mut fresh_storage = Vec::new();
     if remember {
         for svc in open {
             let Some(wv) = app.get_webview(svc.label()) else { continue };
@@ -291,6 +322,12 @@ fn save_sessions(app: &AppHandle) {
                     fresh.push((svc, kept));
                 }
                 Err(e) => eprintln!("chatly: couldn't read {} cookies: {e}", svc.id()),
+            }
+            if let Some(origin) = svc.storage_origin() {
+                match read_site_storage(&wv, origin) {
+                    Some(items) => fresh_storage.push((svc, items)),
+                    None => eprintln!("chatly: couldn't read {} site storage, kept the saved copy", svc.id()),
+                }
             }
         }
     }
@@ -307,8 +344,22 @@ fn save_sessions(app: &AppHandle) {
             eprintln!("chatly: couldn't encrypt sessions: {e}");
             return;
         }
+        let mut stored = v.read_storage(&key).unwrap_or_default();
+        for (svc, items) in fresh_storage {
+            #[cfg(debug_assertions)]
+            eprintln!("chatly: {}: saved {} storage items", svc.id(), items.len());
+            if items.is_empty() {
+                stored.remove(svc.id());
+            } else {
+                stored.insert(svc.id().to_string(), items);
+            }
+        }
+        if let Err(e) = v.write_storage(&key, &stored) {
+            eprintln!("chatly: couldn't encrypt site storage: {e}");
+            return;
+        }
     } else {
-        v.sessions = None;
+        v.forget_sessions();
     }
     st.persist(&i);
 }
@@ -466,7 +517,7 @@ fn open_popup(app: &AppHandle, svc: Service, url: Url) {
     if let Some(target) = services::unwrap_link_shim(&url) {
         return open_in_browser(app, target);
     }
-    if services::is_meta(&url) {
+    if svc.owns(&url) {
         let app = app.clone();
         std::thread::spawn(move || {
             if let Some(wv) = app.get_webview(svc.label()) {
@@ -716,7 +767,7 @@ async fn update_settings(app: AppHandle, settings: Settings) -> Res<Status> {
         let was = v.settings.remember_sessions;
         v.settings = settings.clone();
         if !settings.remember_sessions {
-            v.sessions = None;
+            v.forget_sessions();
         }
         st.persist(&i);
         was
@@ -798,7 +849,12 @@ async fn sign_out(app: AppHandle, service: Service) -> Res<Status> {
         if let (Some(key), Some(v)) = (key, i.vault.as_mut()) {
             let mut sessions = v.read_sessions(&key).unwrap_or_default();
             sessions.remove(service.id());
+            let mut stored = v.read_storage(&key).unwrap_or_default();
+            stored.remove(service.id());
             if let Err(e) = v.write_sessions(&key, &sessions) {
+                return Err(e.to_string());
+            }
+            if let Err(e) = v.write_storage(&key, &stored) {
                 return Err(e.to_string());
             }
         }
@@ -901,6 +957,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let view = SubmenuBuilder::new(app, "View")
         .item(&item("svc:instagram", "Instagram", "CmdOrCtrl+1")?)
         .item(&item("svc:facebook", "Facebook", "CmdOrCtrl+2")?)
+        .item(&item("svc:telegram", "Telegram", "CmdOrCtrl+3")?)
         .separator()
         .item(&item("nav:messages", "Messages", "CmdOrCtrl+Shift+M")?)
         .item(&item("nav:home", "Home", "CmdOrCtrl+Shift+H")?)
@@ -909,7 +966,12 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         .item(&item("nav:forward", "Forward", "CmdOrCtrl+]")?)
         .item(&item("nav:reload", "Reload", "CmdOrCtrl+R")?)
         .build()?;
-    let window = SubmenuBuilder::new(app, "Window").minimize().maximize().separator().fullscreen().build()?;
+    let window = SubmenuBuilder::new(app, "Window")
+        .minimize()
+        .maximize()
+        .separator()
+        .fullscreen()
+        .build()?;
     MenuBuilder::new(app).items(&[&app_menu, &edit, &view, &window]).build()
 }
 

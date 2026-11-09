@@ -7,15 +7,20 @@ pub enum Service {
     #[default]
     Instagram,
     Facebook,
+    Telegram,
 }
 
+const CONTENT_SCRIPT: &str = include_str!("content.js");
+const LINK_DOMAINS_SLOT: &str = "__CHATLY_LINK_DOMAINS__";
+
 impl Service {
-    pub const ALL: [Service; 2] = [Service::Instagram, Service::Facebook];
+    pub const ALL: [Service; 3] = [Service::Instagram, Service::Facebook, Service::Telegram];
 
     pub fn id(self) -> &'static str {
         match self {
             Service::Instagram => "instagram",
             Service::Facebook => "facebook",
+            Service::Telegram => "telegram",
         }
     }
 
@@ -27,6 +32,7 @@ impl Service {
         match self {
             Service::Instagram => "svc-instagram",
             Service::Facebook => "svc-facebook",
+            Service::Telegram => "svc-telegram",
         }
     }
 
@@ -34,6 +40,7 @@ impl Service {
         let url = match self {
             Service::Instagram => "https://www.instagram.com/",
             Service::Facebook => "https://www.facebook.com/",
+            Service::Telegram => "https://web.telegram.org/a/",
         };
         Url::parse(url).expect("static URL")
     }
@@ -42,8 +49,46 @@ impl Service {
         let url = match self {
             Service::Instagram => "https://www.instagram.com/direct/inbox/",
             Service::Facebook => "https://www.facebook.com/messages/",
+            Service::Telegram => "https://web.telegram.org/a/",
         };
         Url::parse(url).expect("static URL")
+    }
+
+    pub fn domains(self) -> &'static [&'static str] {
+        match self {
+            Service::Instagram | Service::Facebook => META_DOMAINS,
+            Service::Telegram => TELEGRAM_DOMAINS,
+        }
+    }
+
+    pub fn link_domains(self) -> &'static [&'static str] {
+        match self {
+            Service::Instagram | Service::Facebook => META_DOMAINS,
+            Service::Telegram => TELEGRAM_LINK_DOMAINS,
+        }
+    }
+
+    pub fn owns(self, url: &Url) -> bool {
+        url.scheme() == "https" && url.host_str().is_some_and(|h| self.domains().iter().any(|d| host_in(h, d)))
+    }
+
+    pub fn storage_origin(self) -> Option<&'static str> {
+        match self {
+            Service::Instagram | Service::Facebook => None,
+            Service::Telegram => Some("https://web.telegram.org"),
+        }
+    }
+
+    pub fn unread_in_title(self) -> bool {
+        match self {
+            Service::Instagram | Service::Facebook => true,
+            Service::Telegram => false,
+        }
+    }
+
+    pub fn content_script(self) -> String {
+        let domains = serde_json::to_string(self.link_domains()).expect("a list of strings serializes");
+        CONTENT_SCRIPT.replace(LINK_DOMAINS_SLOT, &domains)
     }
 }
 
@@ -61,17 +106,14 @@ const META_DOMAINS: &[&str] = &[
     "m.me",
 ];
 
+const TELEGRAM_DOMAINS: &[&str] = &["web.telegram.org"];
+
+const TELEGRAM_LINK_DOMAINS: &[&str] = &["web.telegram.org", "t.me", "telegram.me", "telegram.dog"];
+
 const CAPTCHA_DOMAINS: &[&str] = &["recaptcha.net", "hcaptcha.com", "arkoselabs.com", "funcaptcha.com"];
 
 fn host_in(host: &str, domain: &str) -> bool {
     host == domain || host.strip_suffix(domain).is_some_and(|rest| rest.ends_with('.'))
-}
-
-pub fn is_meta(url: &Url) -> bool {
-    url.scheme() == "https"
-        && url
-            .host_str()
-            .is_some_and(|h| META_DOMAINS.iter().any(|d| host_in(h, d)))
 }
 
 fn is_captcha(url: &Url) -> bool {
@@ -85,21 +127,18 @@ fn is_captcha(url: &Url) -> bool {
         || CAPTCHA_DOMAINS.iter().any(|d| host_in(host, d))
 }
 
-pub fn allowed_in_app(url: &Url) -> bool {
+pub fn allowed_in_app(svc: Service, url: &Url) -> bool {
     match url.scheme() {
         "about" => matches!(url.path(), "blank" | "srcdoc"),
-        "blob" => Url::parse(url.path()).is_ok_and(|inner| is_meta(&inner)),
-        "https" => is_meta(url) || is_captcha(url),
+        "blob" => Url::parse(url.path()).is_ok_and(|inner| svc.owns(&inner)),
+        "https" => svc.owns(url) || is_captcha(url),
         _ => false,
     }
 }
 
 pub fn unwrap_link_shim(url: &Url) -> Option<Url> {
     let host = url.host_str()?;
-    let shim = matches!(
-        host,
-        "l.instagram.com" | "l.facebook.com" | "lm.facebook.com" | "l.messenger.com"
-    );
+    let shim = matches!(host, "l.instagram.com" | "l.facebook.com" | "lm.facebook.com" | "l.messenger.com");
     if !shim {
         return None;
     }
@@ -136,25 +175,82 @@ mod tests {
 
     #[test]
     fn meta_hosts() {
-        assert!(is_meta(&u("https://www.instagram.com/direct/inbox/")));
-        assert!(is_meta(&u("https://scontent-lax3-1.cdninstagram.com/x.jpg")));
-        assert!(is_meta(&u("https://facebook.com/")));
-        assert!(!is_meta(&u("http://www.facebook.com/")), "plain http is refused");
-        assert!(!is_meta(&u("https://notfacebook.com/")));
-        assert!(!is_meta(&u("https://facebook.com.evil.example/")));
-        assert!(!is_meta(&u("https://evil.example/?facebook.com")));
+        let ig = Service::Instagram;
+        assert!(ig.owns(&u("https://www.instagram.com/direct/inbox/")));
+        assert!(ig.owns(&u("https://scontent-lax3-1.cdninstagram.com/x.jpg")));
+        assert!(ig.owns(&u("https://facebook.com/")));
+        assert!(!ig.owns(&u("http://www.facebook.com/")), "plain http is refused");
+        assert!(!ig.owns(&u("https://notfacebook.com/")));
+        assert!(!ig.owns(&u("https://facebook.com.evil.example/")));
+        assert!(!ig.owns(&u("https://evil.example/?facebook.com")));
+    }
+
+    #[test]
+    fn telegram_hosts() {
+        let tg = Service::Telegram;
+        assert!(tg.owns(&u("https://web.telegram.org/a/")));
+        assert!(tg.owns(&u("https://web.telegram.org/k/#@durov")));
+        assert!(!tg.owns(&u("http://web.telegram.org/a/")), "plain http is refused");
+        assert!(!tg.owns(&u("https://telegram.org/faq")), "only Telegram Web loads in place");
+        assert!(!tg.owns(&u("https://t.me/durov")));
+        assert!(!tg.owns(&u("https://telegra.ph/x")));
+        assert!(!tg.owns(&u("https://web.telegram.org.evil.example/")));
+        assert!(!tg.owns(&u("https://notweb.telegram.org/")));
+        assert!(!tg.owns(&u("https://evil.example/?web.telegram.org")));
+    }
+
+    #[test]
+    fn sites_stay_apart() {
+        assert!(!allowed_in_app(Service::Telegram, &u("https://www.instagram.com/")));
+        assert!(!allowed_in_app(Service::Telegram, &u("https://www.facebook.com/")));
+        assert!(!allowed_in_app(Service::Instagram, &u("https://web.telegram.org/a/")));
+        assert!(!allowed_in_app(Service::Facebook, &u("https://web.telegram.org/a/")));
+        assert!(!allowed_in_app(Service::Telegram, &u("blob:https://www.facebook.com/1234")));
+        assert!(allowed_in_app(Service::Telegram, &u("blob:https://web.telegram.org/1234")));
+    }
+
+    #[test]
+    fn link_domains_cover_domains() {
+        for svc in Service::ALL {
+            for d in svc.domains() {
+                assert!(svc.link_domains().contains(d), "{} link domains miss {d}", svc.id());
+            }
+        }
+    }
+
+    #[test]
+    fn content_script_gets_each_sites_domains() {
+        for svc in Service::ALL {
+            let script = svc.content_script();
+            assert!(!script.contains(LINK_DOMAINS_SLOT), "{} script still has the placeholder", svc.id());
+            for d in svc.link_domains() {
+                assert!(script.contains(&format!("\"{d}\"")), "{} script misses {d}", svc.id());
+            }
+        }
+        assert!(!Service::Telegram.content_script().contains("instagram.com"));
+        assert!(!Service::Instagram.content_script().contains("t.me"));
+    }
+
+    #[test]
+    fn ids_round_trip() {
+        for svc in Service::ALL {
+            assert_eq!(Service::from_id(svc.id()), Some(svc));
+            assert_eq!(serde_json::to_string(&svc).unwrap(), format!("\"{}\"", svc.id()));
+        }
     }
 
     #[test]
     fn in_app_rules() {
-        assert!(allowed_in_app(&u("about:blank")));
-        assert!(allowed_in_app(&u("https://www.google.com/recaptcha/api2/anchor")));
-        assert!(!allowed_in_app(&u("https://www.google.com/search?q=x")));
-        assert!(!allowed_in_app(&u("https://example.com/")));
-        assert!(!allowed_in_app(&u("file:///etc/passwd")));
-        assert!(!allowed_in_app(&u("data:text/html,hi")));
-        assert!(allowed_in_app(&u("blob:https://www.facebook.com/1234")));
-        assert!(!allowed_in_app(&u("blob:https://evil.example/1234")));
+        let ig = Service::Instagram;
+        assert!(allowed_in_app(ig, &u("about:blank")));
+        assert!(allowed_in_app(ig, &u("https://www.google.com/recaptcha/api2/anchor")));
+        assert!(allowed_in_app(Service::Telegram, &u("https://www.google.com/recaptcha/api2/anchor")));
+        assert!(!allowed_in_app(ig, &u("https://www.google.com/search?q=x")));
+        assert!(!allowed_in_app(ig, &u("https://example.com/")));
+        assert!(!allowed_in_app(ig, &u("file:///etc/passwd")));
+        assert!(!allowed_in_app(ig, &u("data:text/html,hi")));
+        assert!(allowed_in_app(ig, &u("blob:https://www.facebook.com/1234")));
+        assert!(!allowed_in_app(ig, &u("blob:https://evil.example/1234")));
     }
 
     #[test]

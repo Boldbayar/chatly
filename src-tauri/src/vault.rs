@@ -12,18 +12,20 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
 };
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 use zeroize::Zeroizing;
 
-use crate::services::Service;
+use crate::{services::Service, storage::SiteStorage};
 
 pub type Key = Zeroizing<[u8; 32]>;
 pub type Sessions = BTreeMap<String, Vec<StoredCookie>>;
+pub type Storage = BTreeMap<String, SiteStorage>;
 
 const FORMAT_VERSION: u32 = 1;
 const AAD_WRAPPED_KEY: &[u8] = b"chatly/v1/wrapped-key";
 const AAD_KEY_CHECK: &[u8] = b"chatly/v1/key-check";
 const AAD_SESSIONS: &[u8] = b"chatly/v1/sessions";
+const AAD_STORAGE: &[u8] = b"chatly/v1/storage";
 
 const KDF_MEMORY_KIB: u32 = 64 * 1024;
 const KDF_PASSES: u32 = 3;
@@ -181,6 +183,8 @@ pub struct Vault {
     #[serde(default)]
     pub sessions: Option<Sealed>,
     #[serde(default)]
+    pub storage: Option<Sealed>,
+    #[serde(default)]
     pub touch_id: bool,
     #[serde(default)]
     pub failed_attempts: u32,
@@ -188,7 +192,7 @@ pub struct Vault {
     pub lockout_until: u64,
     #[serde(default)]
     pub settings: Settings,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "known_service")]
     pub last_service: Service,
 }
 
@@ -203,6 +207,7 @@ impl Vault {
             key_check: seal(&key, b"chatly", AAD_KEY_CHECK),
             kdf,
             sessions: None,
+            storage: None,
             touch_id: false,
             failed_attempts: 0,
             lockout_until: 0,
@@ -236,17 +241,26 @@ impl Vault {
     }
 
     pub fn read_sessions(&self, key: &Key) -> Result<Sessions, Error> {
-        let Some(sealed) = &self.sessions else {
-            return Ok(Sessions::new());
-        };
-        let raw = open(key, sealed, AAD_SESSIONS).map_err(|_| Error::Corrupt("sessions".into()))?;
-        serde_json::from_slice(&raw).map_err(|e| Error::Corrupt(e.to_string()))
+        open_json(key, self.sessions.as_ref(), AAD_SESSIONS, "sessions")
     }
 
     pub fn write_sessions(&mut self, key: &Key, sessions: &Sessions) -> Result<(), Error> {
-        let json = Zeroizing::new(serde_json::to_vec(sessions).map_err(|e| Error::Corrupt(e.to_string()))?);
-        self.sessions = Some(seal(key, &json, AAD_SESSIONS));
+        self.sessions = Some(seal_json(key, sessions, AAD_SESSIONS)?);
         Ok(())
+    }
+
+    pub fn read_storage(&self, key: &Key) -> Result<Storage, Error> {
+        open_json(key, self.storage.as_ref(), AAD_STORAGE, "site storage")
+    }
+
+    pub fn write_storage(&mut self, key: &Key, storage: &Storage) -> Result<(), Error> {
+        self.storage = Some(seal_json(key, storage, AAD_STORAGE)?);
+        Ok(())
+    }
+
+    pub fn forget_sessions(&mut self) {
+        self.sessions = None;
+        self.storage = None;
     }
 
     pub fn load(path: &Path) -> Result<Option<Vault>, Error> {
@@ -296,6 +310,10 @@ impl Vault {
     }
 }
 
+fn known_service<'de, D: Deserializer<'de>>(d: D) -> Result<Service, D::Error> {
+    Ok(Service::from_id(&String::deserialize(d)?).unwrap_or_default())
+}
+
 fn random<const N: usize>() -> [u8; N] {
     let mut bytes = [0u8; N];
     getrandom::fill(&mut bytes).expect("the OS random number generator is unavailable");
@@ -324,10 +342,25 @@ fn seal(key: &[u8; 32], msg: &[u8], aad: &[u8]) -> Sealed {
     let ct = cipher(key)
         .encrypt(XNonce::from_slice(&nonce), Payload { msg, aad })
         .expect("XChaCha20-Poly1305 encryption does not fail");
-    Sealed {
-        nonce: B64.encode(nonce),
-        ct: B64.encode(ct),
-    }
+    Sealed { nonce: B64.encode(nonce), ct: B64.encode(ct) }
+}
+
+fn seal_json<T: Serialize>(key: &[u8; 32], value: &T, aad: &[u8]) -> Result<Sealed, Error> {
+    let json = Zeroizing::new(serde_json::to_vec(value).map_err(|e| Error::Corrupt(e.to_string()))?);
+    Ok(seal(key, &json, aad))
+}
+
+fn open_json<T: DeserializeOwned + Default>(
+    key: &[u8; 32],
+    sealed: Option<&Sealed>,
+    aad: &[u8],
+    what: &str,
+) -> Result<T, Error> {
+    let Some(sealed) = sealed else {
+        return Ok(T::default());
+    };
+    let raw = open(key, sealed, aad).map_err(|_| Error::Corrupt(what.into()))?;
+    serde_json::from_slice(&raw).map_err(|e| Error::Corrupt(e.to_string()))
 }
 
 fn open(key: &[u8; 32], sealed: &Sealed, aad: &[u8]) -> Result<Zeroizing<Vec<u8>>, ()> {
@@ -420,6 +453,59 @@ mod tests {
         assert_eq!(vault.lockout_remaining(1000), MAX_LOCKOUT_SECS);
         vault.record_success();
         assert_eq!(vault.lockout_remaining(1000), 0);
+    }
+
+    #[test]
+    fn site_storage_is_encrypted_and_bound_to_the_key() {
+        let (mut vault, key) = Vault::create("pw-for-test").unwrap();
+        let mut storage = Storage::new();
+        storage.insert("telegram".into(), [("dc2_auth_key".to_string(), "\"c0ffee\"".to_string())].into());
+        vault.write_storage(&key, &storage).unwrap();
+        let on_disk = serde_json::to_string(&vault).unwrap();
+        assert!(!on_disk.contains("dc2_auth_key"), "storage keys must not be stored in plain text");
+        assert!(!on_disk.contains("c0ffee"), "storage values must not be stored in plain text");
+        assert_eq!(vault.read_storage(&key).unwrap(), storage);
+        assert!(vault.read_storage(&Zeroizing::new([1; 32])).is_err());
+    }
+
+    #[test]
+    fn sessions_and_storage_cant_be_swapped() {
+        let (mut vault, key) = Vault::create("pw-for-test").unwrap();
+        let mut s = Sessions::new();
+        s.insert("instagram".into(), vec![cookie("sessionid")]);
+        vault.write_sessions(&key, &s).unwrap();
+        vault.storage = vault.sessions.clone();
+        assert!(vault.read_storage(&key).is_err());
+        vault.write_storage(&key, &Storage::new()).unwrap();
+        vault.sessions = vault.storage.clone();
+        assert!(vault.read_sessions(&key).is_err());
+    }
+
+    #[test]
+    fn forgetting_clears_cookies_and_storage() {
+        let (mut vault, key) = Vault::create("pw-for-test").unwrap();
+        vault.write_sessions(&key, &Sessions::new()).unwrap();
+        vault.write_storage(&key, &Storage::new()).unwrap();
+        vault.forget_sessions();
+        assert!(vault.sessions.is_none() && vault.storage.is_none());
+        assert!(vault.read_storage(&key).unwrap().is_empty());
+    }
+
+    #[test]
+    fn vaults_without_storage_still_load() {
+        let (vault, key) = Vault::create("pw-for-test").unwrap();
+        let mut json = serde_json::to_value(&vault).unwrap();
+        json.as_object_mut().unwrap().remove("storage");
+        let old: Vault = serde_json::from_value(json).unwrap();
+        assert!(old.storage.is_none());
+        assert!(old.read_storage(&key).unwrap().is_empty());
+        let mut json = serde_json::to_value(&vault).unwrap();
+        json["last_service"] = "telegram".into();
+        let with_telegram: Vault = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(with_telegram.last_service, Service::Telegram);
+        json["last_service"] = "a-site-from-a-newer-build".into();
+        let newer: Vault = serde_json::from_value(json).unwrap();
+        assert_eq!(newer.last_service, Service::default());
     }
 
     #[test]

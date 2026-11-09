@@ -17,7 +17,7 @@ pub struct Finding {
 }
 
 pub fn run() -> Vec<Finding> {
-    let tls: Vec<_> = ["www.instagram.com", "www.facebook.com"]
+    let tls: Vec<_> = ["www.instagram.com", "www.facebook.com", "web.telegram.org"]
         .into_iter()
         .map(|host| std::thread::spawn(move || tls(host)))
         .collect();
@@ -102,7 +102,9 @@ fn tls(host: &'static str) -> Finding {
         Ok(()) => Finding {
             label,
             level: "ok",
-            detail: "Encrypted end to end with Meta's public certificate. No HTTPS inspection on this path.".into(),
+            detail: "Encrypted all the way to the site, with a certificate from a public authority. \
+                     No HTTPS inspection on this path."
+                .into(),
         },
         Err(Failure::Intercepted(why)) => Finding {
             label,
